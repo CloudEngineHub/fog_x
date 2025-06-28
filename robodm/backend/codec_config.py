@@ -36,9 +36,10 @@ class CodecConfig:
             cc.pix_fmt = pix_fmt
             cc.time_base = Fraction(1, 30)
             cc.open(strict=True)
-            cc.close()
+            # Note: CodecContext doesn't have a close() method in newer PyAV versions
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Codec config validation failed: {e}")
             return False
 
     @staticmethod
@@ -206,19 +207,12 @@ class CodecConfig:
             # Raw codec option names  
             raw_option_names = {'batch_size', 'compression', 'algorithm'}
             
-            print(f"DEBUG: Separating codec options: {self.custom_options}")
             for key, value in self.custom_options.items():
                 if key in video_option_names:
                     self.video_custom_options[key] = value
-                    print(f"DEBUG: Added {key}={value} to video options")
                 elif key in raw_option_names:
                     self.raw_custom_options[key] = value
-                    print(f"DEBUG: Added {key}={value} to raw options")
-                else:
-                    print(f"DEBUG: Ignoring unknown option {key}={value}")
                 # If unknown, don't assign to either (safer than guessing)
-            
-            print(f"DEBUG: Final separation - video: {self.video_custom_options}, raw: {self.raw_custom_options}")
 
         # Validate all specified codecs
         all_codecs = set([self.codec])
@@ -402,13 +396,11 @@ class CodecConfig:
             default_options = self.IMAGE_CODEC_CONFIGS[codec].get("options", {}).copy()
             # Only merge video-specific custom options
             default_options.update(self.video_custom_options)
-            print(f"DEBUG: Video codec {codec} options: default={self.IMAGE_CODEC_CONFIGS[codec].get('options', {})}, custom={self.video_custom_options}, final={default_options}")
         elif codec in self.RAW_DATA_CODEC_CONFIGS:
             # Raw data codec - only use raw-specific options
             default_options = self.RAW_DATA_CODEC_CONFIGS[codec].get("options", {}).copy()
             # Only merge raw-specific custom options
             default_options.update(self.raw_custom_options)
-            print(f"DEBUG: Raw codec {codec} options: default={self.RAW_DATA_CODEC_CONFIGS[codec].get('options', {})}, custom={self.raw_custom_options}, final={default_options}")
 
         return default_options
 
