@@ -1,6 +1,9 @@
+import glob
+import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Text, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Text
 
 import numpy as np
 
@@ -12,9 +15,11 @@ try:
 except ImportError:
     RAY_AVAILABLE = False
 
-from robodm.loader.vla import (LoadingMode, RayVLALoader, SliceConfig,
-                               create_slice_loader, create_trajectory_loader)
+import robodm
+from robodm.metadata.metadata_manager import MetadataManager
 from robodm.utils.flatten import data_to_tf_schema
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -23,29 +28,27 @@ class DatasetConfig:
 
     batch_size: int = 1
     shuffle: bool = False
-    num_parallel_reads: int = 4
+    num_parallel_reads: int = 128
     ray_init_kwargs: Optional[Dict] = None
+    use_metadata: bool = True
+    auto_build_metadata: bool = True
 
 
 class VLADataset:
     """
-    Ray Dataset-based VLA dataset supporting both trajectory and slice loading modes.
-
-    This dataset provides:
-    1. Parallel data loading using Ray Dataset
-    2. Automatic shuffling and splitting
-    3. Support for both trajectory and slice loading modes
-    4. Efficient data management for large datasets
+    Ray Dataset-based VLA dataset with integrated metadata management.
+    
+    This dataset integrates:
+    1. Ray Dataset for parallel data loading and processing
+    2. MetadataManager for efficient metadata handling
+    3. Automatic data management and optimization
     """
 
     def __init__(
         self,
         path: Text,
-        mode: Union[str, LoadingMode] = LoadingMode.TRAJECTORY,
-        split: str = "all",
         return_type: str = "numpy",
         config: Optional[DatasetConfig] = None,
-        slice_config: Optional[SliceConfig] = None,
         **kwargs,
     ):
         """
@@ -53,12 +56,9 @@ class VLADataset:
 
         Args:
             path: Path to VLA files (can be glob pattern, directory, or single file)
-            mode: Loading mode ("trajectory" or "slice", or LoadingMode enum)
-            split: Data split ("all", "train", "val")
             return_type: Return type ("numpy", "tensor", "container")
             config: Dataset configuration
-            slice_config: Slice configuration (required if mode="slice")
-            **kwargs: Additional arguments passed to RayVLALoader
+            **kwargs: Additional arguments
         """
         if not RAY_AVAILABLE:
             raise ImportError(
@@ -69,127 +69,169 @@ class VLADataset:
         self.return_type = return_type
         self.config = config or DatasetConfig()
 
-        # Handle string mode input
-        if isinstance(mode, str):
-            mode = LoadingMode.TRAJECTORY if mode == "trajectory" else LoadingMode.SLICE
-        self.mode = mode
-
         # Initialize Ray if not already initialized
         if not ray.is_initialized():
             ray.init(**(self.config.ray_init_kwargs or {}))
 
-        # Create the loader
-        self.loader = RayVLALoader(
-            path=path,
-            mode=mode,
-            batch_size=self.config.batch_size,
-            return_type=return_type,
-            shuffle=self.config.shuffle,
-            num_parallel_reads=self.config.num_parallel_reads,
-            slice_config=slice_config,
-            **kwargs,
-        )
+        # Get file paths and create Ray dataset
+        self.file_paths = self._get_files(path)
+        self.ray_dataset = self._create_dataset()
+
+        # Initialize metadata manager
+        self.metadata_manager = self._create_metadata_manager()
 
         # Cache for schema and stats
         self._schema = None
         self._stats: Optional[Dict[str, Any]] = None
+        
+        logger.info(f"Initialized VLADataset with {len(self.file_paths)} files")
 
-    @classmethod
-    def create_trajectory_dataset(
-        cls,
-        path: Text,
-        split: str = "all",
-        return_type: str = "numpy",
-        config: Optional[DatasetConfig] = None,
-        **kwargs,
-    ) -> "VLADataset":
-        """Create a dataset for loading complete trajectories."""
-        return cls(
-            path=path,
-            mode=LoadingMode.TRAJECTORY,
-            return_type=return_type,
-            config=config,
-            **kwargs,
+    def _get_files(self, path: str) -> List[str]:
+        """Get list of VLA files based on path."""
+        files = []
+
+        if "*" in path:
+            files = glob.glob(path)
+        elif os.path.isdir(path):
+            files = glob.glob(os.path.join(path, "*.vla"))
+        else:
+            files = [path]
+
+        return files
+
+    def _create_dataset(self) -> rd.Dataset:
+        """Create Ray dataset from file paths."""
+        # Create dataset from file paths and load trajectories
+        dataset = rd.from_items(self.file_paths)
+        
+        # Map each file to its trajectory data
+        dataset = dataset.map(
+            self._load_trajectory,
+            num_cpus=self.config.num_parallel_reads,
+            concurrency=self.config.num_parallel_reads,
         )
 
-    @classmethod
-    def create_slice_dataset(
-        cls,
-        path: Text,
-        slice_length: int = 100,
-        return_type: str = "numpy",
-        config: Optional[DatasetConfig] = None,
-        min_slice_length: Optional[int] = None,
-        stride: int = 1,
-        random_start: bool = True,
-        overlap_ratio: float = 0.0,
-        **kwargs,
-    ) -> "VLADataset":
-        """Create a dataset for loading trajectory slices."""
-        slice_config = SliceConfig(
-            slice_length=slice_length,
-            min_slice_length=min_slice_length,
-            stride=stride,
-            random_start=random_start,
-            overlap_ratio=overlap_ratio,
-        )
+        # Apply shuffling if requested
+        if self.config.shuffle:
+            dataset = dataset.random_shuffle()
 
-        return cls(
-            path=path,
-            mode=LoadingMode.SLICE,
-            return_type=return_type,
-            config=config,
-            slice_config=slice_config,
-            **kwargs,
+        return dataset
+
+    def _load_trajectory(self, item) -> Dict[str, Any]:
+        """Load a complete trajectory from file."""
+        # Handle both string paths and dict items from Ray dataset
+        if isinstance(item, dict):
+            file_path = item.get("item", item)
+        else:
+            file_path = item
+
+        try:
+            traj = robodm.Trajectory(file_path)
+            data = traj.load(return_type=self.return_type)
+            
+            # Add file path metadata for tracking
+            data["__file_path__"] = str(file_path)
+            
+            return data
+        except Exception as e:
+            logger.error(f"Error loading trajectory {file_path}: {e}")
+            return {"__file_path__": str(file_path)}
+
+    def _create_metadata_manager(self) -> Optional[MetadataManager]:
+        """Create and initialize metadata manager."""
+        if not self.config.use_metadata:
+            return None
+            
+        # Create metadata manager that works with ray dataset
+        manager = MetadataManager.from_ray_dataset(
+            self.ray_dataset,
+            auto_build=self.config.auto_build_metadata
         )
+        
+        return manager
 
     def get_ray_dataset(self) -> rd.Dataset:
         """Get the underlying Ray dataset."""
-        return self.loader.dataset
+        return self.ray_dataset
 
     def iter_batches(self, batch_size: Optional[int] = None):
         """Iterate over batches of data."""
-        return self.loader.iter_batches(batch_size)
+        batch_size = batch_size or self.config.batch_size
+        return self.ray_dataset.iter_batches(batch_size=batch_size)
 
     def iter_rows(self):
         """Iterate over individual rows of data."""
-        return self.loader.iter_rows()
+        return self.ray_dataset.iter_rows()
 
     def take(self, num_items: int) -> List[Dict[str, Any]]:
         """Take a specific number of items."""
-        return self.loader.take(num_items)
+        return list(self.ray_dataset.take(num_items))
 
     def sample(self,
                num_samples: int,
                replace: bool = False) -> List[Dict[str, Any]]:
         """Sample from the dataset."""
-        return list(self.loader.sample(num_samples, replace))
+        total_count = self.count()
+        if total_count == 0:
+            return []
+
+        if not replace:
+            shuffled_dataset = self.ray_dataset.random_shuffle()
+            return list(shuffled_dataset.take(min(num_samples, total_count)))
+        else:
+            import warnings
+            warnings.warn(
+                "Sampling with replacement may not return exact count due to Ray API limitations"
+            )
+            fraction = min(1.0, num_samples / total_count)
+            sampled = self.ray_dataset.random_sample(fraction)
+            return list(sampled.take(num_samples))
 
     def count(self) -> int:
         """Count the number of items in the dataset."""
-        return self.loader.count()
+        return self.ray_dataset.count()
 
     def schema(self):
         """Get the schema of the dataset."""
         if self._schema is None:
-            self._schema = self.loader.schema()
+            self._schema = self.ray_dataset.schema()
         return self._schema
 
     def split(self, *fractions: float, shuffle: bool = True):
         """Split the dataset into multiple datasets."""
-        ray_datasets = self.loader.split(*fractions, shuffle=shuffle)
+        # Validate fractions sum to <= 1.0
+        if sum(fractions) > 1.0:
+            raise ValueError(
+                f"Sum of fractions {sum(fractions)} must be <= 1.0")
+
+        # Ray Dataset.split() doesn't support shuffle parameter
+        dataset_to_split = self.ray_dataset.random_shuffle() if shuffle else self.ray_dataset
+
+        if len(fractions) == 1:
+            ray_datasets = dataset_to_split.train_test_split(test_size=fractions[0], shuffle=False)
+        elif len(fractions) == 2 and abs(sum(fractions) - 1.0) < 1e-10:
+            ray_datasets = dataset_to_split.train_test_split(test_size=fractions[1], shuffle=False)
+        else:
+            fractions_list = list(fractions)
+            total = sum(fractions_list)
+
+            if abs(total - 1.0) < 1e-10:
+                fractions_list[-1] -= 1e-6
+                splits = dataset_to_split.split_proportionately(fractions_list)
+                ray_datasets = splits[:-1]
+            else:
+                ray_datasets = dataset_to_split.split_proportionately(fractions_list)
 
         # Create new VLADataset instances for each split
         split_datasets = []
         for ray_ds in ray_datasets:
             split_dataset = VLADataset.__new__(VLADataset)
             split_dataset.path = self.path
-            split_dataset.mode = self.mode
             split_dataset.return_type = self.return_type
             split_dataset.config = self.config
-            split_dataset.loader = self.loader.__class__.__new__(
-                self.loader.__class__)
-            split_dataset.loader.dataset = ray_ds
+            split_dataset.file_paths = self.file_paths
+            split_dataset.ray_dataset = ray_ds
+            split_dataset.metadata_manager = self.metadata_manager
             split_dataset._schema = self._schema
             split_dataset._stats = None
             split_datasets.append(split_dataset)
@@ -200,12 +242,11 @@ class VLADataset:
         """Filter the dataset."""
         filtered_dataset = VLADataset.__new__(VLADataset)
         filtered_dataset.path = self.path
-        filtered_dataset.mode = self.mode
         filtered_dataset.return_type = self.return_type
         filtered_dataset.config = self.config
-        filtered_dataset.loader = self.loader.__class__.__new__(
-            self.loader.__class__)
-        filtered_dataset.loader.dataset = self.loader.dataset.filter(fn)
+        filtered_dataset.file_paths = self.file_paths
+        filtered_dataset.ray_dataset = self.ray_dataset.filter(fn)
+        filtered_dataset.metadata_manager = self.metadata_manager
         filtered_dataset._schema = self._schema
         filtered_dataset._stats = None
         return filtered_dataset
@@ -214,12 +255,11 @@ class VLADataset:
         """Map a function over the dataset."""
         mapped_dataset = VLADataset.__new__(VLADataset)
         mapped_dataset.path = self.path
-        mapped_dataset.mode = self.mode
         mapped_dataset.return_type = self.return_type
         mapped_dataset.config = self.config
-        mapped_dataset.loader = self.loader.__class__.__new__(
-            self.loader.__class__)
-        mapped_dataset.loader.dataset = self.loader.dataset.map(fn, **kwargs)
+        mapped_dataset.file_paths = self.file_paths
+        mapped_dataset.ray_dataset = self.ray_dataset.map(fn, **kwargs)
+        mapped_dataset.metadata_manager = self.metadata_manager
         mapped_dataset._schema = None  # Schema might change after mapping
         mapped_dataset._stats = None
         return mapped_dataset
@@ -228,20 +268,18 @@ class VLADataset:
         """Shuffle the dataset."""
         shuffled_dataset = VLADataset.__new__(VLADataset)
         shuffled_dataset.path = self.path
-        shuffled_dataset.mode = self.mode
         shuffled_dataset.return_type = self.return_type
         shuffled_dataset.config = self.config
-        shuffled_dataset.loader = self.loader.__class__.__new__(
-            self.loader.__class__)
-        shuffled_dataset.loader.dataset = self.loader.dataset.random_shuffle(
-            seed=seed)
+        shuffled_dataset.file_paths = self.file_paths
+        shuffled_dataset.ray_dataset = self.ray_dataset.random_shuffle(seed=seed)
+        shuffled_dataset.metadata_manager = self.metadata_manager
         shuffled_dataset._schema = self._schema
         shuffled_dataset._stats = None
         return shuffled_dataset
 
     def materialize(self):
         """Materialize the dataset in memory."""
-        return self.loader.materialize()
+        return self.ray_dataset.materialize()
 
     def get_stats(self) -> Dict[str, Any]:
         """Get dataset statistics."""
@@ -249,69 +287,41 @@ class VLADataset:
             sample = self.peek()
             if sample:
                 self._stats = {
-                    "mode":
-                    self.mode.value,
-                    "return_type":
-                    self.return_type,
-                    "total_items":
-                    self.count(),
-                    "sample_keys":
-                    (list(sample.keys()) if isinstance(sample, dict) else []),
+                    "return_type": self.return_type,
+                    "total_items": self.count(),
+                    "sample_keys": (list(sample.keys()) if isinstance(sample, dict) else []),
                 }
 
-                # Add mode-specific stats
-                assert (self._stats is not None
-                        )  # Type checker hint - _stats was just assigned above
-                if self.mode == LoadingMode.TRAJECTORY:
-                    # For trajectory mode, estimate length from first key
-                    first_key = (next(iter(sample.keys())) if sample
-                                 and isinstance(sample, dict) else None)
-                    if first_key and sample and hasattr(
-                            sample[first_key], "__len__"):
-                        self._stats["trajectory_length"] = len(
-                            sample[first_key])
-                elif self.mode == LoadingMode.SLICE:
-                    # For slice mode, estimate length from first key
-                    first_key = (next(iter(sample.keys())) if sample
-                                 and isinstance(sample, dict) else None)
-                    if first_key and sample and hasattr(
-                            sample[first_key], "__len__"):
-                        self._stats["slice_length"] = len(sample[first_key])
-                        self._stats["slice_start"] = (
-                            0  # Cannot determine from direct data
-                        )
-                        self._stats["slice_end"] = len(sample[first_key])
+                # Add trajectory length info from first data key (excluding metadata)
+                data_keys = [k for k in sample.keys() if not k.startswith("__")]
+                if data_keys and sample:
+                    first_key = data_keys[0]
+                    if hasattr(sample[first_key], "__len__"):
+                        self._stats["trajectory_length"] = len(sample[first_key])
             else:
-                self._stats = {"mode": self.mode.value, "total_items": 0}
+                self._stats = {"total_items": 0}
 
-        assert (
-            self._stats is not None
-        )  # Type checker hint - _stats is always assigned in this method
         return self._stats
 
     def peek(self) -> Optional[Dict[str, Any]]:
         """Peek at the first item without consuming it."""
-        return self.loader.peek()
+        try:
+            return self.ray_dataset.take(1)[0]
+        except:
+            return None
 
     def get_tf_schema(self):
         """Get TensorFlow schema for the dataset."""
         sample = self.peek()
         if sample:
-            return data_to_tf_schema(sample)
+            # Filter out metadata keys
+            data_sample = {k: v for k, v in sample.items() if not k.startswith("__")}
+            return data_to_tf_schema(data_sample)
         return None
 
-    # Legacy compatibility methods
     def __iter__(self):
-        """Iterate over the dataset (legacy compatibility)."""
-        for item in self.loader.iter_rows():
-            yield item
-
-    def __next__(self):
-        """Get next item (legacy compatibility)."""
-        batch = self.loader.get_batch()
-        if batch:
-            return batch[0]
-        raise StopIteration
+        """Iterate over the dataset."""
+        return self.iter_rows()
 
     def __len__(self) -> int:
         """Get the number of items in the dataset."""
@@ -323,64 +333,27 @@ class VLADataset:
             "Random access not supported for Ray datasets. "
             "Use take(), sample(), or iterate over the dataset instead.")
 
-    def get_loader(self):
-        """Get the underlying loader (legacy compatibility)."""
-        return self.loader
-
-    def get_next_trajectory(self):
-        """Get next trajectory (legacy compatibility)."""
-        item = next(self)
-        return item
-
 
 # Utility functions for common dataset operations
-def load_trajectory_dataset(
+def load_dataset(
     path: Text,
-    split: str = "all",
     return_type: str = "numpy",
     batch_size: int = 1,
     shuffle: bool = False,
     num_parallel_reads: int = 4,
     **kwargs,
 ) -> VLADataset:
-    """Load a dataset for complete trajectories."""
-    config = DatasetConfig(batch_size=batch_size,
-                           shuffle=shuffle,
-                           num_parallel_reads=num_parallel_reads)
-    return VLADataset.create_trajectory_dataset(path=path,
-                                                return_type=return_type,
-                                                config=config,
-                                                **kwargs)
-
-
-def load_slice_dataset(
-    path: Text,
-    slice_length: int = 100,
-    split: str = "all",
-    return_type: str = "numpy",
-    batch_size: int = 1,
-    shuffle: bool = False,
-    num_parallel_reads: int = 4,
-    min_slice_length: Optional[int] = None,
-    stride: int = 1,
-    random_start: bool = True,
-    overlap_ratio: float = 0.0,
-    **kwargs,
-) -> VLADataset:
-    """Load a dataset for trajectory slices."""
-    config = DatasetConfig(batch_size=batch_size,
-                           shuffle=shuffle,
-                           num_parallel_reads=num_parallel_reads)
-    return VLADataset.create_slice_dataset(
+    """Load a VLA dataset from path."""
+    config = DatasetConfig(
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_parallel_reads=num_parallel_reads
+    )
+    return VLADataset(
         path=path,
-        slice_length=slice_length,
         return_type=return_type,
         config=config,
-        min_slice_length=min_slice_length,
-        stride=stride,
-        random_start=random_start,
-        overlap_ratio=overlap_ratio,
-        **kwargs,
+        **kwargs
     )
 
 
