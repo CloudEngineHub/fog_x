@@ -231,9 +231,9 @@ class TestTrajectoryTimeIntegration:
             base_dt = datetime(2023, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
             trajectory = Trajectory(path,
-                                   mode="w",
-                                   base_datetime=base_dt,
-                                   time_unit="ms")
+                                    mode="w",
+                                    base_datetime=base_dt,
+                                    time_unit="ms")
 
             # Add data at specific datetime points
             dt1 = base_dt + timedelta(seconds=1)

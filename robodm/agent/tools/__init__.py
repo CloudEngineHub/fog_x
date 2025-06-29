@@ -16,64 +16,47 @@ The new system provides:
 """
 
 # Core system components
-from .base import BaseTool, ToolMetadata, ToolRegistry, get_registry, register_tool
-from .manager import ToolsManager
-from .config import (
-    create_vision_config,
-    create_analysis_config, 
-    create_minimal_config,
-    create_custom_config,
-    get_preset_config,
-    list_preset_configs,
-    validate_config,
-    merge_configs,
-    get_default_config
-)
-
+from .base import (BaseTool, ToolMetadata, ToolRegistry, get_registry,
+                   register_tool)
+from .config import (create_analysis_config, create_custom_config,
+                     create_minimal_config, create_vision_config,
+                     get_default_config, get_preset_config,
+                     list_preset_configs, merge_configs, validate_config)
 # Tool implementations (these auto-register when imported)
-from .implementations import (
-    VisionLanguageModelTool,
-    ImageAnalysisTool,
-    TrajectoryAnalysisTool,
-    # Legacy function wrappers for backward compatibility
-    VisionLanguageModel,
-    analyze_image,
-    analyze_trajectory,
-    detect_scene_changes,
-    extract_keyframes
-)
+from .implementations import (  # Legacy function wrappers for backward compatibility
+    ImageAnalysisTool, TrajectoryAnalysisTool, VisionLanguageModel,
+    VisionLanguageModelTool, analyze_image, analyze_trajectory,
+    detect_scene_changes, extract_keyframes)
+from .manager import ToolsManager
 
 __all__ = [
     # Core system
-    'BaseTool',
-    'ToolMetadata', 
-    'ToolRegistry',
-    'get_registry',
-    'register_tool',
-    'ToolsManager',
-    
+    "BaseTool",
+    "ToolMetadata",
+    "ToolRegistry",
+    "get_registry",
+    "register_tool",
+    "ToolsManager",
     # Configuration
-    'create_vision_config',
-    'create_analysis_config', 
-    'create_minimal_config',
-    'create_custom_config',
-    'get_preset_config',
-    'list_preset_configs',
-    'validate_config',
-    'merge_configs',
-    'get_default_config',
-    
+    "create_vision_config",
+    "create_analysis_config",
+    "create_minimal_config",
+    "create_custom_config",
+    "get_preset_config",
+    "list_preset_configs",
+    "validate_config",
+    "merge_configs",
+    "get_default_config",
     # Tool implementations
-    'VisionLanguageModelTool',
-    'ImageAnalysisTool', 
-    'TrajectoryAnalysisTool',
-    
+    "VisionLanguageModelTool",
+    "ImageAnalysisTool",
+    "TrajectoryAnalysisTool",
     # Legacy compatibility
-    'VisionLanguageModel',
-    'analyze_image',
-    'analyze_trajectory',
-    'detect_scene_changes',
-    'extract_keyframes'
+    "VisionLanguageModel",
+    "analyze_image",
+    "analyze_trajectory",
+    "detect_scene_changes",
+    "extract_keyframes",
 ]
 
 
@@ -84,21 +67,23 @@ def _initialize_default_tools():
     # This function exists for any future initialization needs
     pass
 
+
 _initialize_default_tools()
 
 
 # Convenience functions for common operations
-def create_manager(config_preset: str = "default", **preset_kwargs) -> ToolsManager:
+def create_manager(config_preset: str = "default",
+                   **preset_kwargs) -> ToolsManager:
     """
     Create a ToolsManager with a preset configuration.
-    
+
     Args:
         config_preset: Name of preset configuration to use
         **preset_kwargs: Additional arguments for preset configuration
-        
+
     Returns:
         Configured ToolsManager instance
-        
+
     Example:
         >>> manager = create_manager("vision", temperature=0.05)
         >>> manager = create_manager("minimal", model="llama-7b")
@@ -110,7 +95,7 @@ def create_manager(config_preset: str = "default", **preset_kwargs) -> ToolsMana
 def list_available_tools() -> list:
     """
     List all available tools in the registry.
-    
+
     Returns:
         List of tool names
     """
@@ -121,7 +106,7 @@ def list_available_tools() -> list:
 def get_tool_documentation() -> str:
     """
     Get documentation for all available tools.
-    
+
     Returns:
         Formatted documentation string
     """
@@ -130,8 +115,5 @@ def get_tool_documentation() -> str:
 
 
 # Add convenience functions to __all__
-__all__.extend([
-    'create_manager',
-    'list_available_tools', 
-    'get_tool_documentation'
-])
+__all__.extend(
+    ["create_manager", "list_available_tools", "get_tool_documentation"])

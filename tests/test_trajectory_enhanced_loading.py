@@ -19,20 +19,24 @@ def create_test_data(num_steps=100, rng=None):
     """Generate deterministic test data."""
     if rng is None:
         rng = np.random.RandomState(42)
-    
-    return [{
-        "observations/image": rng.randint(0, 255, (64, 64, 3), dtype=np.uint8),
-        "observations/position": rng.randn(3).astype(np.float32),
-        "observations/velocity": rng.randn(3).astype(np.float32),
-        "action": rng.randn(7).astype(np.float32),
-        "reward": np.float32(rng.randn()),
-        "done": False,
-        "info/success": i > num_steps * 0.8,
-        "info/task_id": i % 5,
-        "metadata/episode_id": 0,
-        "metadata/step": i,
-        "timestamp": i * 100,  # 100ms intervals
-    } for i in range(num_steps)]
+
+    return [
+        {
+            "observations/image": rng.randint(0,
+                                              255, (64, 64, 3),
+                                              dtype=np.uint8),
+            "observations/position": rng.randn(3).astype(np.float32),
+            "observations/velocity": rng.randn(3).astype(np.float32),
+            "action": rng.randn(7).astype(np.float32),
+            "reward": np.float32(rng.randn()),
+            "done": False,
+            "info/success": i > num_steps * 0.8,
+            "info/task_id": i % 5,
+            "metadata/episode_id": 0,
+            "metadata/step": i,
+            "timestamp": i * 100,  # 100ms intervals
+        } for i in range(num_steps)
+    ]
 
 
 @pytest.fixture
@@ -41,7 +45,7 @@ def base_trajectory_data():
     return create_test_data(100)
 
 
-@pytest.fixture  
+@pytest.fixture
 def temp_dir(tmpdir):
     """Create a temporary directory."""
     return str(tmpdir)
@@ -61,7 +65,9 @@ def trajectory_path(temp_dir, base_trajectory_data) -> str:
             k: v
             for k, v in step_data.items() if k != "timestamp"
         }
-        traj.add_by_dict(data_without_timestamp, timestamp=timestamp_ms, time_unit="ms")
+        traj.add_by_dict(data_without_timestamp,
+                         timestamp=timestamp_ms,
+                         time_unit="ms")
 
     traj.close()
     return path
@@ -115,7 +121,7 @@ class TestTrajectoryLoad:
 
         expected_keys = {
             "observations/image",
-            "observations/position", 
+            "observations/position",
             "observations/velocity",
             "action",
             "reward",
@@ -153,12 +159,12 @@ class TestTrajectoryLoad:
         t = Trajectory(trajectory_path, mode="r")
         data = t.load()
         t.close()
-        
+
         # Check data shapes
         assert data["observations/image"].shape == (100, 64, 64, 3)
         assert data["observations/position"].shape == (100, 3)
         assert data["action"].shape == (100, 7)
-        assert data["reward"].shape == (100,)
+        assert data["reward"].shape == (100, )
 
     def test_load_nonexistent_file(self, temp_dir):
         """Test loading non-existent file raises appropriate error."""
@@ -170,14 +176,19 @@ class TestTrajectoryLoad:
         """Test trajectory with single frame."""
         path = os.path.join(temp_dir, "single_frame.vla")
         traj = Trajectory(path, mode="w")
-        traj.add_by_dict({"value": 42, "name": "single"}, timestamp=0, time_unit="ms")
+        traj.add_by_dict({
+            "value": 42,
+            "name": "single"
+        },
+                         timestamp=0,
+                         time_unit="ms")
         traj.close()
 
         t = Trajectory(path, mode="r")
         data = t.load()
         t.close()
 
-        assert data["value"].shape == (1,)
+        assert data["value"].shape == (1, )
         assert data["value"][0] == 42
         assert data["name"][0] == "single"
 
@@ -187,13 +198,16 @@ class TestTrajectoryLoad:
         traj = Trajectory(path, mode="w")
 
         nested_data = {
-            "robot/arm/joints/position": rng.randn(7).astype(np.float32),
-            "robot/arm/joints/velocity": rng.randn(7).astype(np.float32),
-            "sensors/camera/left/image": rng.randint(
-                0, 255, (32, 32, 3), dtype=np.uint8
-            ),
-            "meta/info/timestamp/ns": 1000000,
-            "status": True,
+            "robot/arm/joints/position":
+            rng.randn(7).astype(np.float32),
+            "robot/arm/joints/velocity":
+            rng.randn(7).astype(np.float32),
+            "sensors/camera/left/image":
+            rng.randint(0, 255, (32, 32, 3), dtype=np.uint8),
+            "meta/info/timestamp/ns":
+            1000000,
+            "status":
+            True,
         }
 
         for i in range(5):
@@ -217,19 +231,26 @@ class TestTrajectoryLoadIntegration:
     def test_full_pipeline_integration(self, temp_dir, rng):
         """Test full pipeline from creation to loading."""
         path = os.path.join(temp_dir, "pipeline_test.vla")
-        
+
         # Create trajectory with various data types
         traj = Trajectory(path, mode="w")
-        
+
         for i in range(50):
             step_data = {
-                "observations/rgb": rng.randint(0, 255, (128, 128, 3), dtype=np.uint8),
-                "observations/depth": rng.rand(128, 128).astype(np.float32),
-                "observations/proprioception": rng.randn(14).astype(np.float32),
-                "actions/joint_positions": rng.randn(7).astype(np.float32),
-                "actions/gripper": rng.choice([0, 1]),
-                "rewards/sparse": float(i > 40),
-                "rewards/dense": np.float32(rng.randn()),
+                "observations/rgb":
+                rng.randint(0, 255, (128, 128, 3), dtype=np.uint8),
+                "observations/depth":
+                rng.rand(128, 128).astype(np.float32),
+                "observations/proprioception":
+                rng.randn(14).astype(np.float32),
+                "actions/joint_positions":
+                rng.randn(7).astype(np.float32),
+                "actions/gripper":
+                rng.choice([0, 1]),
+                "rewards/sparse":
+                float(i > 40),
+                "rewards/dense":
+                np.float32(rng.randn()),
                 "info": {
                     "step": i,
                     "episode": 0,
@@ -237,9 +258,11 @@ class TestTrajectoryLoadIntegration:
                     "phase": "test"
                 },
             }
-            traj.add_by_dict(step_data,
-                             timestamp=int(i * 20),  # 20ms intervals
-                             time_unit="ms")
+            traj.add_by_dict(
+                step_data,
+                timestamp=int(i * 20),
+                time_unit="ms"  # 20ms intervals
+            )
 
         traj.close()
 
@@ -250,7 +273,7 @@ class TestTrajectoryLoadIntegration:
         full_data = t.load()
         assert full_data["observations/rgb"].shape == (50, 128, 128, 3)
         assert full_data["actions/joint_positions"].shape == (50, 7)
-        assert full_data["info/step"].shape == (50,)
+        assert full_data["info/step"].shape == (50, )
 
         t.close()
 
@@ -261,12 +284,14 @@ class TestTrajectoryLoadIntegration:
 
         # Add some normal data
         for i in range(10):
-            traj.add_by_dict({
-                "value": i,
-                "data": np.array([i, i + 1])
-            },
-                             timestamp=i * 100,
-                             time_unit="ms")
+            traj.add_by_dict(
+                {
+                    "value": i,
+                    "data": np.array([i, i + 1])
+                },
+                timestamp=i * 100,
+                time_unit="ms",
+            )
 
         traj.close()
 

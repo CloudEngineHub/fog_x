@@ -4,8 +4,8 @@ import os
 import random
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Text, Union
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Text, Union
 
 import numpy as np
 
@@ -131,24 +131,29 @@ class RayVLALoader(BaseLoader):
         else:
             # For single file, use its parent directory
             dataset_dir = path_obj.parent
-        
+
         self.metadata_manager = MetadataManager(dataset_dir)
-        
+
         # Check if metadata exists
         if not self.metadata_manager.exists():
             if self.auto_build_metadata:
                 logger.info(f"Building metadata for dataset at {dataset_dir}")
                 build_dataset_metadata(str(dataset_dir))
             else:
-                logger.warning("Metadata file not found and auto_build_metadata is False")
+                logger.warning(
+                    "Metadata file not found and auto_build_metadata is False")
                 self.use_metadata = False
                 return
-        
+
         # Load metadata into cache
         try:
             all_metadata = self.metadata_manager.get_all_metadata()
-            self.metadata_cache = {meta.file_path: meta for meta in all_metadata}
-            logger.info(f"Loaded metadata for {len(self.metadata_cache)} trajectories")
+            self.metadata_cache = {
+                meta.file_path: meta
+                for meta in all_metadata
+            }
+            logger.info(
+                f"Loaded metadata for {len(self.metadata_cache)} trajectories")
         except Exception as e:
             logger.error(f"Failed to load metadata: {e}")
             self.use_metadata = False
@@ -222,22 +227,24 @@ class RayVLALoader(BaseLoader):
             # Try to get trajectory length from metadata first
             file_path_str = str(Path(file_path).resolve())
             traj_length = None
-            
+
             if self.use_metadata and file_path_str in self.metadata_cache:
                 metadata = self.metadata_cache[file_path_str]
                 traj_length = metadata.trajectory_length
-                logger.debug(f"Using cached metadata for {file_path}: length={traj_length}")
-            
+                logger.debug(
+                    f"Using cached metadata for {file_path}: length={traj_length}"
+                )
+
             # If we have metadata and know the trajectory is too short, skip loading
             min_length = (self.slice_config.min_slice_length
                           or self.slice_config.slice_length)
-            
+
             if traj_length is not None and traj_length < min_length:
                 logger.warning(
                     f"Trajectory {file_path} too short ({traj_length} < {min_length})"
                 )
                 return []
-            
+
             # Load trajectory data
             traj = robodm.Trajectory(file_path)
             full_data = traj.load(return_type=self.return_type)

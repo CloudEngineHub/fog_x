@@ -51,7 +51,7 @@ class TestNonShuffleVLALoader:
         # Skip libaom-av1 due to known issues with flush
         if codec == "libaom-av1":
             pytest.skip("libaom-av1 codec has known issues with flush")
-            
+
         # Create VLA files with specific codec
         paths = []
         working_paths = []
@@ -143,7 +143,7 @@ class TestVLALoaderCodecValidation:
         # Skip libaom-av1 due to known issues with flush
         if codec == "libaom-av1":
             pytest.skip("libaom-av1 codec has known issues with flush")
-            
+
         # Create test data designed to catch encoding issues
         test_data = {
             "observation/image": [

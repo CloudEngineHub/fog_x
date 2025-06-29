@@ -126,8 +126,8 @@ class FeatureType:
             feature_type._set(dtype, data_shape)
         else:
             dtype = type(data).__name__
-            if dtype == 'object':
-                dtype = 'string'
+            if dtype == "object":
+                dtype = "string"
             empty_shape: Tuple[int, ...] = ()
             try:
                 feature_type._set(dtype, empty_shape)

@@ -184,7 +184,7 @@ class TestPixelFormatSelection:
             assert (
                 result == "yuv420p"
             ), f"RGB data with {codec} should get yuv420p, got {result}"
-        
+
         # FFV1 uses rgb24 to avoid YUV conversion issues
         result = config.get_pixel_format("ffv1", rgb_type)
         assert result == "rgb24", f"RGB data with ffv1 should get rgb24, got {result}"
@@ -201,8 +201,10 @@ class TestPixelFormatSelection:
         for data_type in [grayscale_type, vector_type]:
             for codec in ["libx264", "libx265", "libaom-av1"]:
                 result = config.get_pixel_format(codec, data_type)
-                assert result == "yuv420p", f"Image codec {codec} should return yuv420p, got {result}"
-            
+                assert (
+                    result == "yuv420p"
+                ), f"Image codec {codec} should return yuv420p, got {result}"
+
             # FFV1 returns rgb24 as default
             result = config.get_pixel_format("ffv1", data_type)
             assert result == "rgb24", f"FFV1 should return rgb24, got {result}"

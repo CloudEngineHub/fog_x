@@ -15,7 +15,12 @@ from robodm.trajectory_base import FileSystemInterface, TimeProvider
 from .test_fixtures import MockFileSystem, MockTimeProvider
 
 # Define all codecs to test
-ALL_CODECS = ["ffv1", "libaom-av1", "libx264", "libx265"]  # Removed rawvideo due to compression artifacts
+ALL_CODECS = [
+    "ffv1",
+    "libaom-av1",
+    "libx264",
+    "libx265",
+]  # Removed rawvideo due to compression artifacts
 
 
 def validate_codec_roundtrip(temp_dir, codec, test_data):
@@ -107,7 +112,12 @@ class TestCodecConfig:
         # Large image should get video codec
         large_image_type = FeatureType(dtype="uint8", shape=(480, 640, 3))
         codec = config.get_codec_for_feature(large_image_type)
-        assert codec in ["libx264", "libx265", "libaom-av1", "ffv1"]  # Any valid video codec
+        assert codec in [
+            "libx264",
+            "libx265",
+            "libaom-av1",
+            "ffv1",
+        ]  # Any valid video codec
 
         # Small data should get rawvideo
         small_data_type = FeatureType(dtype="float32", shape=(7, ))
@@ -208,7 +218,12 @@ class TestTrajectoryFactory:
             mock_container = Mock()
             mock_av.return_value = mock_container
 
-            traj = Trajectory(path, mode="w", filesystem=mock_filesystem, time_provider=mock_time_provider)
+            traj = Trajectory(
+                path,
+                mode="w",
+                filesystem=mock_filesystem,
+                time_provider=mock_time_provider,
+            )
             assert traj._filesystem == mock_filesystem
             assert traj._time_provider == mock_time_provider
 
@@ -433,7 +448,12 @@ class TestTrajectory:
             mock_container = Mock()
             mock_av.return_value = mock_container
 
-            traj = Trajectory(path="/test/test.vla", mode="w", filesystem=mock_filesystem, time_provider=mock_time_provider)
+            traj = Trajectory(
+                path="/test/test.vla",
+                mode="w",
+                filesystem=mock_filesystem,
+                time_provider=mock_time_provider,
+            )
 
             # Test that filesystem methods are called on mock
             assert traj._exists("/test/test.vla")
@@ -926,40 +946,40 @@ class TestCodecValidation:
 
 class TestNewCodecSystem:
     """Test cases for the new codec abstraction system integration with Trajectory"""
-    
+
     def test_rawvideo_pickle_codec(self, temp_dir):
         """Test explicit pickle raw codec usage"""
         path = os.path.join(temp_dir, "pickle_codec_test.vla")
-        
+
         # Create trajectory with explicit pickle codec
         traj = Trajectory(path, mode="w", video_codec="rawvideo_pickle")
-        
+
         # Add non-image data that should use raw codec
         for i in range(5):
             data = {
                 "robot/joints": np.random.rand(7).astype(np.float32),
                 "sensor/vector": np.random.rand(10).astype(np.float32),
-                "metadata/step": i
+                "metadata/step": i,
             }
             traj.add_by_dict(data)
-        
+
         traj.close()
-        
+
         # Read back and verify
         traj_read = Trajectory(path, mode="r")
         loaded_data = traj_read.load()
         traj_read.close()
-        
+
         assert "robot/joints" in loaded_data
         assert "sensor/vector" in loaded_data
         assert "metadata/step" in loaded_data
         assert loaded_data["robot/joints"].shape == (5, 7)
         assert loaded_data["sensor/vector"].shape == (5, 10)
-        assert loaded_data["metadata/step"].shape == (5,)
-    
+        assert loaded_data["metadata/step"].shape == (5, )
+
     @pytest.mark.skipif(
         True,  # Skip by default since PyArrow may not be available
-        reason="PyArrow may not be available in test environment"
+        reason="PyArrow may not be available in test environment",
     )
     def test_rawvideo_pyarrow_codec(self, temp_dir):
         """Test PyArrow batch codec usage"""
@@ -967,75 +987,79 @@ class TestNewCodecSystem:
             import pyarrow
         except ImportError:
             pytest.skip("PyArrow not available")
-        
+
         path = os.path.join(temp_dir, "pyarrow_codec_test.vla")
-        
+
         # Create trajectory with PyArrow codec
-        traj = Trajectory(path, mode="w", video_codec="rawvideo_pyarrow") 
-        
+        traj = Trajectory(path, mode="w", video_codec="rawvideo_pyarrow")
+
         # Add non-image data
         for i in range(10):
             data = {
                 "robot/joints": np.random.rand(7).astype(np.float32),
                 "sensor/vector": np.random.rand(5).astype(np.float32),
-                "step": i
+                "step": i,
             }
             traj.add_by_dict(data)
-        
+
         traj.close()
-        
+
         # Read back and verify
         traj_read = Trajectory(path, mode="r")
         loaded_data = traj_read.load()
         traj_read.close()
-        
+
         assert "robot/joints" in loaded_data
         assert loaded_data["robot/joints"].shape == (10, 7)
-        assert loaded_data["step"].shape == (10,)
-    
+        assert loaded_data["step"].shape == (10, )
+
     def test_mixed_codec_usage(self, temp_dir):
         """Test trajectory with mixed image and raw data using different codecs"""
         path = os.path.join(temp_dir, "mixed_codec_test.vla")
-        
+
         # Create trajectory with auto codec selection
         traj = Trajectory(path, mode="w", video_codec="auto")
-        
+
         for i in range(3):
             data = {
                 # RGB image - should use video codec
-                "camera/rgb": np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8),
+                "camera/rgb":
+                np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8),
                 # Non-image data - should use raw codec
-                "robot/joints": np.random.rand(7).astype(np.float32),
-                "sensor/depth": np.random.rand(64, 64).astype(np.float32),  # 2D grayscale
-                "metadata/step": i
+                "robot/joints":
+                np.random.rand(7).astype(np.float32),
+                "sensor/depth":
+                np.random.rand(64, 64).astype(np.float32),  # 2D grayscale
+                "metadata/step":
+                i,
             }
             traj.add_by_dict(data)
-        
+
         traj.close()
-        
+
         # Read back and verify
         traj_read = Trajectory(path, mode="r")
         loaded_data = traj_read.load()
         traj_read.close()
-        
+
         # Verify all data types are present and correctly shaped
         assert "camera/rgb" in loaded_data
-        assert "robot/joints" in loaded_data  
+        assert "robot/joints" in loaded_data
         assert "sensor/depth" in loaded_data
         assert "metadata/step" in loaded_data
-        
+
         assert loaded_data["camera/rgb"].shape == (3, 64, 64, 3)
         assert loaded_data["robot/joints"].shape == (3, 7)
         assert loaded_data["sensor/depth"].shape == (3, 64, 64)
-        assert loaded_data["metadata/step"].shape == (3,)
-    
+        assert loaded_data["metadata/step"].shape == (3, )
+
     def test_codec_config_integration(self, temp_dir):
         """Test codec configuration integration with new system"""
         path = os.path.join(temp_dir, "codec_config_test.vla")
-        
+
         # Test feature-specific codec mapping
         traj = Trajectory(path, mode="w", video_codec="rawvideo_pickle")
-        
+
         # Add test data
         for i in range(3):
             data = {
@@ -1043,101 +1067,109 @@ class TestNewCodecSystem:
                 "step": i
             }
             traj.add_by_dict(data)
-        
+
         traj.close()
-        
+
         # Verify file created and readable
         assert os.path.exists(path)
-        
+
         traj_read = Trajectory(path, mode="r")
         loaded_data = traj_read.load()
         traj_read.close()
-        
+
         assert "sensor/data" in loaded_data
         assert loaded_data["sensor/data"].shape == (3, 5)
-    
+
     def test_backward_compatibility(self, temp_dir):
         """Test that existing rawvideo behavior still works"""
         path = os.path.join(temp_dir, "backward_compat_test.vla")
-        
+
         # Use old-style rawvideo specification
         traj = Trajectory(path, mode="w", video_codec="rawvideo")
-        
+
         # Add various data types
         for i in range(3):
             data = {
                 "robot/joints": np.random.rand(7).astype(np.float32),
                 "sensor/vector": np.random.rand(3).astype(np.float32),
-                "step": i
+                "step": i,
             }
             traj.add_by_dict(data)
-        
+
         traj.close()
-        
+
         # Read back and verify
         traj_read = Trajectory(path, mode="r")
         loaded_data = traj_read.load()
         traj_read.close()
-        
+
         assert "robot/joints" in loaded_data
         assert loaded_data["robot/joints"].shape == (3, 7)
-    
+
     def test_codec_error_handling(self, temp_dir):
         """Test that codec errors are handled gracefully"""
         path = os.path.join(temp_dir, "error_handling_test.vla")
-        
+
         # This should not crash even if codec creation fails
         traj = Trajectory(path, mode="w", video_codec="rawvideo")
-        
+
         # Add data that might be problematic
         complex_data = {
-            "complex_object": {"nested": {"data": [1, 2, 3]}},
+            "complex_object": {
+                "nested": {
+                    "data": [1, 2, 3]
+                }
+            },
             "empty_array": np.array([]),
-            "large_array": np.random.rand(1000).astype(np.float32)
+            "large_array": np.random.rand(1000).astype(np.float32),
         }
-        
+
         # Should handle gracefully
         traj.add_by_dict(complex_data)
         traj.close()
-        
+
         # Should be able to read back
         traj_read = Trajectory(path, mode="r")
         loaded_data = traj_read.load()
         traj_read.close()
-        
+
         assert "complex_object/nested/data" in loaded_data  # Flattened key
         assert "large_array" in loaded_data
-    
+
     def test_codec_performance_comparison(self, temp_dir):
         """Test and compare performance of different codecs"""
         import time
-        
+
         # Test data
         test_data = []
         for i in range(20):
             test_data.append({
-                "robot/joints": np.random.rand(7).astype(np.float32),
-                "sensor/vector": np.random.rand(10).astype(np.float32),
-                "step": i
+                "robot/joints":
+                np.random.rand(7).astype(np.float32),
+                "sensor/vector":
+                np.random.rand(10).astype(np.float32),
+                "step":
+                i,
             })
-        
+
         # Skip this test as rawvideo codec has issues
         pytest.skip("Skipping performance test due to rawvideo codec issues")
-        
+
         codecs_to_test = ["rawvideo", "rawvideo_pickle"]
-        
+
         # Test PyArrow if available
         try:
             import pyarrow
+
             codecs_to_test.append("rawvideo_pyarrow")
         except ImportError:
             pass
-        
+
         results = {}
-        
+
         for codec_name in codecs_to_test:
             path = os.path.join(temp_dir, f"perf_test_{codec_name}.vla")
-            
+
             # Measure write time
             start_time = time.time()
             traj = Trajectory(path, mode="w", video_codec=codec_name)
@@ -1145,44 +1177,51 @@ class TestNewCodecSystem:
                 traj.add_by_dict(data)
             traj.close()
             write_time = time.time() - start_time
-            
+
             # Measure read time
             start_time = time.time()
             traj_read = Trajectory(path, mode="r")
             loaded_data = traj_read.load()
             traj_read.close()
             read_time = time.time() - start_time
-            
+
             # Measure file size
             file_size = os.path.getsize(path)
-            
+
             results[codec_name] = {
                 "write_time": write_time,
                 "read_time": read_time,
                 "file_size": file_size,
-                "data_integrity": len(loaded_data) > 0
+                "data_integrity": len(loaded_data) > 0,
             }
-        
+
         # All codecs should work
         for codec_name, result in results.items():
-            assert result["data_integrity"], f"Data integrity failed for {codec_name}"
-            assert result["write_time"] > 0, f"Write time should be positive for {codec_name}"
-            assert result["read_time"] > 0, f"Read time should be positive for {codec_name}"
-            assert result["file_size"] > 0, f"File size should be positive for {codec_name}"
-        
+            assert result[
+                "data_integrity"], f"Data integrity failed for {codec_name}"
+            assert (result["write_time"]
+                    > 0), f"Write time should be positive for {codec_name}"
+            assert (result["read_time"]
+                    > 0), f"Read time should be positive for {codec_name}"
+            assert (result["file_size"]
+                    > 0), f"File size should be positive for {codec_name}"
+
         # Print performance comparison for manual inspection
         print(f"\nCodec Performance Comparison:")
-        print(f"{'Codec':<20} {'Write(s)':<10} {'Read(s)':<10} {'Size(KB)':<10}")
+        print(
+            f"{'Codec':<20} {'Write(s)':<10} {'Read(s)':<10} {'Size(KB)':<10}")
         print("-" * 60)
         for codec_name, result in results.items():
-            print(f"{codec_name:<20} {result['write_time']:<10.4f} {result['read_time']:<10.4f} {result['file_size']/1024:<10.1f}")
-    
+            print(
+                f"{codec_name:<20} {result['write_time']:<10.4f} {result['read_time']:<10.4f} {result['file_size']/1024:<10.1f}"
+            )
+
     def test_codec_data_types_support(self, temp_dir):
         """Test that codecs properly handle different data types"""
         path = os.path.join(temp_dir, "data_types_test.vla")
-        
+
         traj = Trajectory(path, mode="w", video_codec="rawvideo")
-        
+
         # Test various data types
         test_data = {
             # Numpy arrays of different types
@@ -1191,125 +1230,135 @@ class TestNewCodecSystem:
             "int32_array": np.random.randint(0, 100, 5).astype(np.int32),
             "int64_array": np.random.randint(0, 100, 5).astype(np.int64),
             "uint8_array": np.random.randint(0, 255, 5).astype(np.uint8),
-            
             # Different shapes
             "vector": np.random.rand(10),
             "matrix": np.random.rand(5, 5),
             "tensor": np.random.rand(2, 3, 4),
-            
             # Scalar values
             "scalar_float": 3.14,
             "scalar_int": 42,
-            
             # Python objects
             "list": [1, 2, 3, 4, 5],
-            "dict": {"nested": {"value": 123}},
-            "string": "test_string"
+            "dict": {
+                "nested": {
+                    "value": 123
+                }
+            },
+            "string": "test_string",
         }
-        
+
         traj.add_by_dict(test_data)
         traj.close()
-        
+
         # Read back and verify all data types
         traj_read = Trajectory(path, mode="r")
         loaded_data = traj_read.load()
         traj_read.close()
-        
+
         # Debug: Print loaded keys for investigation
         print(f"Loaded keys: {list(loaded_data.keys())}")
         print(f"Expected keys: {list(test_data.keys())}")
-        
+
         # Verify numpy arrays
-        for key in ["float32_array", "float64_array", "int32_array", "int64_array", "uint8_array"]:
+        for key in [
+                "float32_array",
+                "float64_array",
+                "int32_array",
+                "int64_array",
+                "uint8_array",
+        ]:
             assert key in loaded_data
             np.testing.assert_array_equal(loaded_data[key][0], test_data[key])
-        
+
         # Verify shapes
         assert loaded_data["vector"].shape == (1, 10)
         assert loaded_data["matrix"].shape == (1, 5, 5)
         assert loaded_data["tensor"].shape == (1, 2, 3, 4)
-        
+
         # Verify scalars and objects
-        assert abs(loaded_data["scalar_float"][0] - test_data["scalar_float"]) < 1e-6
+        assert abs(loaded_data["scalar_float"][0] -
+                   test_data["scalar_float"]) < 1e-6
         assert loaded_data["scalar_int"][0] == test_data["scalar_int"]
-        
+
         # For list comparison, handle the case where it might be converted to numpy array
         loaded_list = loaded_data["list"][0]
         if isinstance(loaded_list, np.ndarray):
             np.testing.assert_array_equal(loaded_list, test_data["list"])
         else:
             assert loaded_list == test_data["list"]
-            
+
         # Only test dict and string if they're actually present
         if "dict" in loaded_data:
             assert loaded_data["dict"][0] == test_data["dict"]
         if "string" in loaded_data:
             assert loaded_data["string"][0] == test_data["string"]
-    
+
     def test_large_batch_handling(self, temp_dir):
         """Test codec system with large batches of data"""
         path = os.path.join(temp_dir, "large_batch_test.vla")
-        
+
         traj = Trajectory(path, mode="w", video_codec="rawvideo")
-        
+
         # Add a large number of timesteps
         batch_size = 100
         for i in range(batch_size):
             data = {
                 "robot/joints": np.random.rand(7).astype(np.float32),
                 "sensor/vector": np.random.rand(20).astype(np.float32),
-                "step": i
+                "step": i,
             }
             traj.add_by_dict(data)
-        
+
         traj.close()
-        
+
         # Read back and verify
         traj_read = Trajectory(path, mode="r")
         loaded_data = traj_read.load()
         traj_read.close()
-        
+
         assert "robot/joints" in loaded_data
         assert loaded_data["robot/joints"].shape == (batch_size, 7)
         assert loaded_data["sensor/vector"].shape == (batch_size, 20)
-        assert loaded_data["step"].shape == (batch_size,)
-        
+        assert loaded_data["step"].shape == (batch_size, )
+
         # Verify step values are correct
-        np.testing.assert_array_equal(loaded_data["step"], np.arange(batch_size))
+        np.testing.assert_array_equal(loaded_data["step"],
+                                      np.arange(batch_size))
 
 
 class TestCodecExtensibility:
     """Test the extensibility features of the new codec system"""
-    
+
     def test_codec_registry_extension(self, temp_dir):
         """Test that the codec system can be extended with custom codecs"""
         # This test would require access to the codec registry
         # For now, just test that the system is designed for extensibility
         path = os.path.join(temp_dir, "extensibility_test.vla")
-        
+
         # Create trajectory - should work with any codec
         traj = Trajectory(path, mode="w", video_codec="rawvideo")
-        
+
         data = {"test": np.array([1, 2, 3])}
         traj.add_by_dict(data)
         traj.close()
-        
+
         # Should be readable
         traj_read = Trajectory(path, mode="r")
         loaded_data = traj_read.load()
         traj_read.close()
-        
+
         assert "test" in loaded_data
-        np.testing.assert_array_equal(loaded_data["test"][0], np.array([1, 2, 3]))
-    
+        np.testing.assert_array_equal(loaded_data["test"][0],
+                                      np.array([1, 2, 3]))
+
     def test_fallback_behavior(self, temp_dir):
         """Test that the system falls back gracefully when codecs fail"""
         path = os.path.join(temp_dir, "fallback_test.vla")
-        
+
         # Even with potentially unsupported codec specification,
         # the system should fall back to working behavior
         traj = Trajectory(path, mode="w", video_codec="rawvideo")
-        
+
         # Add data that should work with fallback
         data = {
             "robot/state": np.random.rand(10).astype(np.float32),
@@ -1317,11 +1366,11 @@ class TestCodecExtensibility:
         }
         traj.add_by_dict(data)
         traj.close()
-        
+
         # Should be readable with fallback behavior
         traj_read = Trajectory(path, mode="r")
         loaded_data = traj_read.load()
         traj_read.close()
-        
+
         assert "robot/state" in loaded_data
         assert loaded_data["robot/state"].shape == (1, 10)

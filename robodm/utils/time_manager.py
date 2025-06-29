@@ -1,12 +1,13 @@
-
-
+import logging
+import time
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
-from typing import Optional, Union, List
-import time
+from typing import List, Optional, Union
+
 import av
-import logging
+
 logger = logging.getLogger(__name__)
+
 
 class TimeManager:
     """

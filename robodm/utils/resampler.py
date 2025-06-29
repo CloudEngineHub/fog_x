@@ -6,8 +6,8 @@ Trajectory class can focus on IO while this helper focuses purely on the
 index accounting.
 """
 
-from typing import Dict, List, Optional
 import logging
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,8 @@ class FrequencyResampler:
         """
         if pts is None:
             # Defensive – treat missing pts like "keep" with no up-sampling.
-            logger.debug("Resampler: packet for '%s' has no pts – keeping.", fname)
+            logger.debug("Resampler: packet for '%s' has no pts – keeping.",
+                         fname)
             keep_current = True
             num_duplicates = 0
         elif self.period_ms is None:
@@ -151,4 +152,4 @@ class FrequencyResampler:
     # Misc
     # ------------------------------------------------------------------ #
     def update_last_pts(self, fname: str, pts: Optional[int]) -> None:
-        self.last_pts[fname] = pts 
+        self.last_pts[fname] = pts
