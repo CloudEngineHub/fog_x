@@ -96,13 +96,22 @@ class CodecManager:
     def _create_codec_instance(self, codec_impl_name: str, config: Dict[str, Any]) -> DataCodec:
         """Create a codec instance with the given configuration."""
         try:
+            # get_codec passes codec_impl_name as the first argument to the codec class
+            # For PyAVVideoCodec, it can handle codec_name being passed either as:
+            # 1. First positional arg: PyAVVideoCodec('libx264', ...)
+            # 2. Keyword arg: PyAVVideoCodec(codec_name='libx264', ...)
+            # Since get_codec doesn't pass codec_name to the constructor, we need to add it
+            # get_codec takes codec_name as its first positional parameter
+            # So we must not include 'codec_name' in the kwargs to avoid duplicate argument error
+            config_without_codec_name = {k: v for k, v in config.items() if k != 'codec_name'}
+            
             if is_video_codec(codec_impl_name):
-                # For video codecs, pass codec_name in config if not already present
-                if 'codec_name' not in config:
-                    config['codec_name'] = codec_impl_name
-                codec = get_codec(codec_impl_name, **config)
-            else:
-                codec = get_codec(codec_impl_name, **config)
+                # PyAVVideoCodec needs codec_name in its constructor kwargs
+                # Since get_codec doesn't pass the codec_name to the constructor,
+                # we need to add it back to the config
+                config_without_codec_name['codec_name'] = codec_impl_name
+            
+            codec = get_codec(codec_impl_name, **config_without_codec_name)
             
             return codec
         except Exception as e:

@@ -140,3 +140,4 @@ temp.gif
 *.mkv
 *.csv
 *.pdf
+.claude/
