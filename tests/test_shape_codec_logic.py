@@ -178,12 +178,16 @@ class TestPixelFormatSelection:
         rgb_type = FeatureType(dtype="uint8", shape=(128, 128, 3))
 
         # Test different codecs
-        yuv_codecs = ["libx264", "libx265", "libaom-av1", "ffv1"]
+        yuv_codecs = ["libx264", "libx265", "libaom-av1"]
         for codec in yuv_codecs:
             result = config.get_pixel_format(codec, rgb_type)
             assert (
                 result == "yuv420p"
             ), f"RGB data with {codec} should get yuv420p, got {result}"
+        
+        # FFV1 uses rgb24 to avoid YUV conversion issues
+        result = config.get_pixel_format("ffv1", rgb_type)
+        assert result == "rgb24", f"RGB data with ffv1 should get rgb24, got {result}"
 
     def test_non_rgb_pixel_format_selection(self):
         """Test pixel format selection for non-RGB data."""
@@ -193,14 +197,15 @@ class TestPixelFormatSelection:
         grayscale_type = FeatureType(dtype="uint8", shape=(128, 128))
         vector_type = FeatureType(dtype="float32", shape=(10, ))
 
-        # These should return None (no pixel format for non-RGB)
+        # Image codecs will still return their pixel formats
         for data_type in [grayscale_type, vector_type]:
-            for codec in ["libx264", "libx265", "libaom-av1", "ffv1"]:
+            for codec in ["libx264", "libx265", "libaom-av1"]:
                 result = config.get_pixel_format(codec, data_type)
-                # Should not return RGB-specific formats
-                assert (
-                    result is None
-                ), f"Non-RGB data should not get pixel format, got {result}"
+                assert result == "yuv420p", f"Image codec {codec} should return yuv420p, got {result}"
+            
+            # FFV1 returns rgb24 as default
+            result = config.get_pixel_format("ffv1", data_type)
+            assert result == "rgb24", f"FFV1 should return rgb24, got {result}"
 
     def test_rawvideo_pixel_format(self):
         """Test that rawvideo returns None for pixel format."""

@@ -17,14 +17,30 @@ except ImportError:
     # Mock PIL if not available
     Image = Mock()
 
-from robodm.agent.tools_registry import (
-    ToolRegistry, VisionLanguageModel, analyze_image, analyze_trajectory,
-    get_default_registry, register_user_tool
-)
-from robodm.agent.tools_config import (
-    ToolsManager, create_vision_heavy_config, create_analysis_heavy_config,
+from robodm.agent.tools import (
+    # Core system components
+    ToolRegistry, get_registry, register_tool,
+    ToolsManager,
+    # Tool implementations - these are instances created by the tools
+    VisionLanguageModelTool, ImageAnalysisTool, TrajectoryAnalysisTool,
+    # Configuration functions
+    create_vision_config, create_analysis_config,
     create_minimal_config, create_custom_config
 )
+
+# Import the actual function implementations for testing
+from robodm.agent.tools.implementations import VisionLanguageModel
+
+# Create legacy function wrappers for testing
+def analyze_image(frame, analysis_type="all", **kwargs):
+    """Legacy wrapper for ImageAnalysisTool."""
+    tool = ImageAnalysisTool(**kwargs)
+    return tool(frame, analysis_type)
+
+def analyze_trajectory(data, analysis_type="statistics", **kwargs):
+    """Legacy wrapper for TrajectoryAnalysisTool."""
+    tool = TrajectoryAnalysisTool(**kwargs)
+    return tool(data, analysis_type)
 
 
 class TestToolRegistry:
@@ -32,7 +48,8 @@ class TestToolRegistry:
     
     def test_registry_init(self):
         """Test registry initialization."""
-        registry = ToolRegistry()
+        # Use the global registry which has tools registered via decorators
+        registry = get_registry()
         
         # Should have default tools
         tools = registry.list_tools()
@@ -44,17 +61,24 @@ class TestToolRegistry:
         """Test registering custom tool."""
         registry = ToolRegistry()
         
-        def custom_tool(x, y, multiplier=2):
-            return (x + y) * multiplier
+        # Create a custom tool class
+        from robodm.agent.tools.base import BaseTool, ToolMetadata
         
-        registry.register_tool(
-            name="custom_add",
-            tool_func=custom_tool,
-            description="Custom addition tool",
-            signature="custom_add(x, y, multiplier=2) -> int",
-            examples=["custom_add(2, 3)", "custom_add(1, 4, multiplier=3)"],
-            default_params={"multiplier": 2}
-        )
+        class CustomAddTool(BaseTool):
+            @classmethod
+            def get_metadata(cls):
+                return ToolMetadata(
+                    name="custom_add",
+                    description="Custom addition tool",
+                    examples=["custom_add(2, 3)", "custom_add(1, 4, multiplier=3)"]
+                )
+            
+            def __call__(self, x, y):
+                multiplier = self.config.get("multiplier", 2)
+                return (x + y) * multiplier
+        
+        # Register the tool
+        registry.register(CustomAddTool)
         
         assert "custom_add" in registry.list_tools()
         
@@ -63,46 +87,44 @@ class TestToolRegistry:
         assert tool(2, 3) == 10  # (2+3)*2
         
         # Test with custom params
-        tool_custom = registry.get_tool("custom_add", {"multiplier": 5})
+        tool_custom = registry.get_tool("custom_add", multiplier=5)
         assert tool_custom(2, 3) == 25  # (2+3)*5
     
     def test_tool_enable_disable(self):
         """Test enabling/disabling tools."""
-        registry = ToolRegistry()
+        registry = get_registry()
         
-        # Disable a tool
-        registry.disable_tool("robo2vlm")
-        enabled_tools = registry.list_tools(enabled_only=True)
-        all_tools = registry.list_tools(enabled_only=False)
+        # Get the tool and disable it
+        tool = registry.get_tool("robo2vlm")
+        tool.disable()
         
-        assert "robo2vlm" not in enabled_tools
-        assert "robo2vlm" in all_tools
+        # Check that it's disabled
+        assert not tool.is_enabled()
         
         # Re-enable the tool
-        registry.enable_tool("robo2vlm")
-        enabled_tools = registry.list_tools(enabled_only=True)
-        assert "robo2vlm" in enabled_tools
+        tool.enable()
+        assert tool.is_enabled()
     
     def test_tools_prompt_generation(self):
         """Test tools prompt generation."""
-        registry = ToolRegistry()
-        prompt = registry.get_tools_prompt()
+        registry = get_registry()
+        prompt = registry.get_tools_documentation()
         
-        assert "Available Tools:" in prompt
+        assert "# Available Tools" in prompt
         assert "robo2vlm" in prompt
         assert "Description:" in prompt
         assert "Signature:" in prompt
-        assert "Usage examples:" in prompt
+        assert "Examples:" in prompt
     
     def test_tools_namespace_creation(self):
         """Test tools namespace creation."""
-        registry = ToolRegistry()
+        registry = get_registry()
         
-        config = {
+        tool_configs = {
             "analyze_image": {"blur_threshold": 50.0}
         }
         
-        namespace = registry.create_tools_namespace(config)
+        namespace = registry.get_tools_namespace(**tool_configs)
         
         assert "robo2vlm" in namespace
         assert "analyze_image" in namespace
@@ -230,7 +252,7 @@ class TestAnalyzeTrajectory:
 class TestVisionLanguageModel:
     """Test cases for VisionLanguageModel tool."""
     
-    @patch('robodm.agent.tools_registry.LLM')
+    @patch('robodm.agent.tools.implementations.LLM')
     def test_vlm_initialization(self, mock_llm_class):
         """Test VLM initialization."""
         mock_llm = Mock()
@@ -241,7 +263,7 @@ class TestVisionLanguageModel:
         assert vlm.model == "test-model"
         assert vlm.temperature == 0.2
     
-    @patch('robodm.agent.tools_registry.LLM')
+    @patch('robodm.agent.tools.implementations.LLM')
     def test_vlm_call(self, mock_llm_class):
         """Test VLM call functionality."""
         # Mock LLM response
@@ -277,13 +299,13 @@ class TestToolsManager:
     def test_manager_initialization(self):
         """Test ToolsManager initialization."""
         config = {
-            "enabled_tools": ["robo2vlm", "analyze_image"],
-            "tool_params": {
+            "disabled_tools": ["analyze_trajectory"],
+            "tools": {
                 "analyze_image": {"blur_threshold": 75.0}
             }
         }
         
-        manager = ToolsManager(config)
+        manager = ToolsManager(config=config)
         
         enabled_tools = manager.list_tools()
         assert "robo2vlm" in enabled_tools
@@ -295,12 +317,12 @@ class TestToolsManager:
         manager = ToolsManager()
         
         # Configure a tool
-        manager.configure_tool("analyze_image", {"blur_threshold": 200.0})
+        manager.configure_tool("analyze_image", blur_threshold=200.0)
         
         config = manager.get_config()
-        assert "tool_params" in config
-        assert "analyze_image" in config["tool_params"]
-        assert config["tool_params"]["analyze_image"]["blur_threshold"] == 200.0
+        assert "tools" in config
+        assert "analyze_image" in config["tools"]
+        assert config["tools"]["analyze_image"]["blur_threshold"] == 200.0
     
     def test_enable_disable_tools(self):
         """Test enabling and disabling tools."""
@@ -319,12 +341,12 @@ class TestToolsManager:
     def test_tools_namespace(self):
         """Test tools namespace creation."""
         config = {
-            "tool_params": {
+            "tools": {
                 "analyze_image": {"blur_threshold": 150.0}
             }
         }
         
-        manager = ToolsManager(config)
+        manager = ToolsManager(config=config)
         namespace = manager.get_tools_namespace()
         
         assert "robo2vlm" in namespace
@@ -336,7 +358,7 @@ class TestToolsManager:
         manager = ToolsManager()
         prompt = manager.get_tools_prompt()
         
-        assert "Available Tools:" in prompt
+        assert "# Available Tools" in prompt
         assert "robo2vlm" in prompt
         assert "analyze_image" in prompt
     
@@ -346,7 +368,7 @@ class TestToolsManager:
         
         new_config = {
             "disabled_tools": ["analyze_trajectory"],
-            "tool_params": {
+            "tools": {
                 "robo2vlm": {"temperature": 0.05}
             }
         }
@@ -357,47 +379,50 @@ class TestToolsManager:
         assert "analyze_trajectory" not in enabled_tools
         
         config = manager.get_config()
-        assert "robo2vlm" in config["tool_params"]
-        assert config["tool_params"]["robo2vlm"]["temperature"] == 0.05
+        assert "robo2vlm" in config["tools"]
+        assert config["tools"]["robo2vlm"]["temperature"] == 0.05
 
 
 class TestConfigurationHelpers:
     """Test cases for configuration helper functions."""
     
-    def test_vision_heavy_config(self):
-        """Test vision-heavy configuration."""
-        config = create_vision_heavy_config()
+    def test_vision_config(self):
+        """Test vision configuration."""
+        config = create_vision_config()
         
-        assert "enabled_tools" in config
-        assert "robo2vlm" in config["enabled_tools"]
-        assert "analyze_image" in config["enabled_tools"]
-        assert "tool_params" in config
+        assert "tools" in config
+        assert "robo2vlm" in config["tools"]
+        assert "analyze_image" in config["tools"]
+        assert "disabled_tools" in config
     
-    def test_analysis_heavy_config(self):
-        """Test analysis-heavy configuration."""
-        config = create_analysis_heavy_config()
+    def test_analysis_config(self):
+        """Test analysis configuration."""
+        config = create_analysis_config()
         
-        assert "enabled_tools" in config
-        assert "analyze_trajectory" in config["enabled_tools"]
-        assert "tool_params" in config
+        assert "tools" in config
+        assert "analyze_trajectory" in config["tools"]
+        assert "disabled_tools" in config
     
     def test_minimal_config(self):
         """Test minimal configuration."""
         config = create_minimal_config()
         
-        assert "enabled_tools" in config
-        assert len(config["enabled_tools"]) == 1
-        assert "robo2vlm" in config["enabled_tools"]
+        assert "tools" in config
+        assert "robo2vlm" in config["tools"]
+        assert "disabled_tools" in config
+        assert "analyze_image" in config["disabled_tools"]
+        assert "analyze_trajectory" in config["disabled_tools"]
     
     def test_custom_config(self):
         """Test custom configuration creation."""
         config = create_custom_config(
             enabled_tools=["robo2vlm"],
-            tool_params={"robo2vlm": {"temperature": 0.0}}
+            tool_parameters={"robo2vlm": {"temperature": 0.0}}
         )
         
-        assert config["enabled_tools"] == ["robo2vlm"]
-        assert config["tool_params"]["robo2vlm"]["temperature"] == 0.0
+        assert "tools" in config
+        assert "robo2vlm" in config["tools"]
+        assert config["tools"]["robo2vlm"]["temperature"] == 0.0
 
 
 class TestUserToolRegistration:
@@ -405,22 +430,27 @@ class TestUserToolRegistration:
     
     def test_register_user_tool(self):
         """Test registering user-defined tool."""
-        def my_custom_tool(data, threshold=0.5):
-            """Custom tool for testing."""
-            return np.mean(data) > threshold
+        from robodm.agent.tools.base import BaseTool, ToolMetadata
         
-        # Register the tool
-        register_user_tool(
-            name="custom_threshold",
-            tool_func=my_custom_tool,
-            description="Check if data mean exceeds threshold",
-            signature="custom_threshold(data: np.ndarray, threshold: float = 0.5) -> bool",
-            examples=["custom_threshold(trajectory_data)", "custom_threshold(values, threshold=0.8)"],
-            default_params={"threshold": 0.5}
-        )
+        class CustomThresholdTool(BaseTool):
+            @classmethod
+            def get_metadata(cls):
+                return ToolMetadata(
+                    name="custom_threshold",
+                    description="Check if data mean exceeds threshold",
+                    examples=["custom_threshold(trajectory_data)", "custom_threshold(values, threshold=0.8)"]
+                )
+            
+            def __call__(self, data, threshold=None):
+                if threshold is None:
+                    threshold = self.config.get("threshold", 0.5)
+                return np.mean(data) > threshold
+        
+        # Get the registry and register the tool
+        registry = get_registry()
+        registry.register(CustomThresholdTool)
         
         # Test that it's registered
-        registry = get_default_registry()
         assert "custom_threshold" in registry.list_tools()
         
         # Test tool usage
@@ -429,28 +459,30 @@ class TestUserToolRegistration:
         assert tool(test_data) == True  # Mean 0.7 > 0.5
         
         # Test with custom threshold
-        tool_custom = registry.get_tool("custom_threshold", {"threshold": 0.8})
+        tool_custom = registry.get_tool("custom_threshold", threshold=0.8)
         assert tool_custom(test_data) == False  # Mean 0.7 < 0.8
     
     def test_tool_class_registration(self):
         """Test registering tool as a class."""
-        class CustomAnalyzer:
-            def __init__(self, sensitivity=1.0):
-                self.sensitivity = sensitivity
+        from robodm.agent.tools.base import BaseTool, ToolMetadata
+        
+        class CustomAnalyzerTool(BaseTool):
+            @classmethod
+            def get_metadata(cls):
+                return ToolMetadata(
+                    name="custom_analyzer",
+                    description="Custom data analyzer",
+                    examples=["custom_analyzer(sensor_data)"]
+                )
             
             def __call__(self, data):
-                return np.std(data) * self.sensitivity
+                sensitivity = self.config.get("sensitivity", 1.0)
+                return np.std(data) * sensitivity
         
-        register_user_tool(
-            name="custom_analyzer",
-            tool_func=CustomAnalyzer,
-            description="Custom data analyzer",
-            signature="custom_analyzer(data: np.ndarray) -> float",
-            examples=["custom_analyzer(sensor_data)"],
-            default_params={"sensitivity": 1.0}
-        )
+        # Get the registry and register the tool
+        registry = get_registry()
+        registry.register(CustomAnalyzerTool)
         
-        registry = get_default_registry()
         tool = registry.get_tool("custom_analyzer")
         
         test_data = np.array([1, 2, 3, 4, 5])
@@ -468,14 +500,14 @@ class TestIntegration:
         # Create configuration
         config = create_custom_config(
             enabled_tools=["analyze_image", "analyze_trajectory"],
-            tool_params={
+            tool_parameters={
                 "analyze_image": {"blur_threshold": 120.0},
                 "analyze_trajectory": {"anomaly_threshold": 2.5}
             }
         )
         
         # Create manager
-        manager = ToolsManager(config)
+        manager = ToolsManager(config=config)
         
         # Get tools namespace
         tools = manager.get_tools_namespace()
@@ -497,12 +529,12 @@ class TestIntegration:
     def test_tool_configuration_persistence(self):
         """Test that tool configurations persist correctly."""
         config = {
-            "tool_params": {
+            "tools": {
                 "analyze_image": {"blur_threshold": 88.0}
             }
         }
         
-        manager = ToolsManager(config)
+        manager = ToolsManager(config=config)
         
         # Get tool and verify configuration
         tools = manager.get_tools_namespace()

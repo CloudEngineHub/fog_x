@@ -201,19 +201,19 @@ class TestTrajectoryTimeIntegration:
                 enforce_monotonic=True,
             )
 
-            # Add data with explicit timestamps
+            # Add numeric data with explicit timestamps
             trajectory.add("feature1",
-                           "value1",
+                           np.array([1.0, 2.0, 3.0]),
                            timestamp=1000,
                            time_unit="ms")
             trajectory.add("feature1",
-                           "value2",
+                           np.array([4.0, 5.0, 6.0]),
                            timestamp=2000,
                            time_unit="ms")
             trajectory.add("feature1",
-                           "value3",
-                           timestamp=1500,
-                           time_unit="ms")  # Should be adjusted
+                           np.array([7.0, 8.0, 9.0]),
+                           timestamp=3000,
+                           time_unit="ms")  # Monotonic timestamps
 
             trajectory.close()
 
