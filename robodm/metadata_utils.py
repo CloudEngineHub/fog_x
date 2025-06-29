@@ -3,7 +3,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import robodm
 from robodm.metadata_manager import MetadataManager, TrajectoryMetadata
@@ -97,7 +97,7 @@ def extract_trajectory_metadata(file_path: str,
 
 
 def build_dataset_metadata(
-    dataset_path: str,
+    dataset_path: Union[str, Path],
     pattern: str = "*.vla",
     compute_checksums: bool = False,
     force_rebuild: bool = False,
@@ -155,9 +155,10 @@ def build_dataset_metadata(
 
 
 def update_dataset_metadata(
-        dataset_path: str,
-        pattern: str = "*.vla",
-        compute_checksums: bool = False) -> MetadataManager:
+    dataset_path: Union[str, Path],
+    pattern: str = "*.vla",
+    compute_checksums: bool = False,
+) -> MetadataManager:
     """
     Update metadata for new or modified files in the dataset.
 

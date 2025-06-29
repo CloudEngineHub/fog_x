@@ -33,9 +33,9 @@ class CodecConfig:
         """Check if a specific width/height/pixel format combination is supported by codec."""
         try:
             cc = av.codec.CodecContext.create(codec_name, "w")
-            cc.width = width
-            cc.height = height
-            cc.pix_fmt = pix_fmt
+            cc.width = width  # type: ignore[attr-defined]
+            cc.height = height  # type: ignore[attr-defined]
+            cc.pix_fmt = pix_fmt  # type: ignore[attr-defined]
             cc.time_base = Fraction(1, 30)
             cc.open(strict=True)
             # Note: CodecContext doesn't have a close() method in newer PyAV versions
@@ -92,7 +92,7 @@ class CodecConfig:
         return codec_name.startswith("rawvideo")
 
     # Image codec configurations (use actual codec for container)
-    IMAGE_CODEC_CONFIGS = {
+    IMAGE_CODEC_CONFIGS: Dict[str, Dict[str, Any]] = {
         "libx264": {
             "container_codec": "libx264",  # Use actual codec for container
             "pixel_format": "yuv420p",
@@ -126,7 +126,7 @@ class CodecConfig:
     }
 
     # Raw data codec configurations (always use rawvideo container)
-    RAW_DATA_CODEC_CONFIGS = {
+    RAW_DATA_CODEC_CONFIGS: Dict[str, Dict[str, Any]] = {
         "rawvideo": {
             "container_codec": "rawvideo",  # Always rawvideo for container
             "internal_codec": "pickle_raw",  # Default internal implementation
@@ -279,15 +279,16 @@ class CodecConfig:
         is_rgb_image = (data_shape is not None and len(data_shape) == 3
                         and data_shape[2] == 3)
 
-        if is_rgb_image:
+        if is_rgb_image and data_shape is not None:
             # This is RGB image data - can use video codecs
             height, width = data_shape[0], data_shape[1]
 
             # Check if a specific video codec was provided
             if self.video_codec and self.video_codec != "auto":
-                if self.is_image_codec(
-                        self.video_codec) and self.is_valid_image_shape(
-                            data_shape, self.video_codec):
+                if (self.is_image_codec(self.video_codec)
+                        and data_shape is not None
+                        and self.is_valid_image_shape(data_shape,
+                                                      self.video_codec)):
                     logger.debug(
                         f"Using specified video codec {self.video_codec} for RGB shape {data_shape}"
                     )
@@ -299,7 +300,8 @@ class CodecConfig:
 
             # Check if user specified a general codec other than auto
             if self.codec != "auto" and self.is_image_codec(self.codec):
-                if self.is_valid_image_shape(data_shape, self.codec):
+                if data_shape is not None and self.is_valid_image_shape(
+                        data_shape, self.codec):
                     logger.debug(
                         f"Using user-specified image codec {self.codec} for RGB shape {data_shape}"
                     )
@@ -318,7 +320,8 @@ class CodecConfig:
             ]
 
             for codec in codec_preferences:
-                if self.is_valid_image_shape(data_shape, codec):
+                if data_shape is not None and self.is_valid_image_shape(
+                        data_shape, codec):
                     logger.debug(
                         f"Selected image codec {codec} for RGB shape {data_shape}"
                     )
@@ -377,16 +380,19 @@ class CodecConfig:
     def get_container_codec(self, codec: str) -> str:
         """Get the container codec name for a given codec."""
         if codec in self.IMAGE_CODEC_CONFIGS:
-            return self.IMAGE_CODEC_CONFIGS[codec]["container_codec"]
+            return cast(str,
+                        self.IMAGE_CODEC_CONFIGS[codec]["container_codec"])
         elif codec in self.RAW_DATA_CODEC_CONFIGS:
-            return self.RAW_DATA_CODEC_CONFIGS[codec]["container_codec"]
+            return cast(str,
+                        self.RAW_DATA_CODEC_CONFIGS[codec]["container_codec"])
         else:
             raise ValueError(f"Unknown codec {codec}")
 
     def get_internal_codec(self, codec: str) -> Optional[str]:
         """Get the internal codec implementation name for raw data codecs."""
         if codec in self.RAW_DATA_CODEC_CONFIGS:
-            return self.RAW_DATA_CODEC_CONFIGS[codec]["internal_codec"]
+            return cast(str,
+                        self.RAW_DATA_CODEC_CONFIGS[codec]["internal_codec"])
         elif codec in self.IMAGE_CODEC_CONFIGS:
             # Image codecs don't have internal codecs
             return None
@@ -402,7 +408,8 @@ class CodecConfig:
         # Fallback for backward compatibility
         legacy_configs = self.CODEC_CONFIGS
         if codec in legacy_configs:
-            return legacy_configs[codec].get("raw_codec", "pickle_raw")
+            return cast(str, legacy_configs[codec].get("raw_codec",
+                                                       "pickle_raw"))
 
         return "pickle_raw"
 
@@ -410,7 +417,9 @@ class CodecConfig:
                          feature_type: FeatureType) -> Optional[str]:
         """Get appropriate pixel format for codec and feature type."""
         if codec in self.IMAGE_CODEC_CONFIGS:
-            base_format = self.IMAGE_CODEC_CONFIGS[codec].get("pixel_format")
+            base_format = cast(
+                Optional[str],
+                self.IMAGE_CODEC_CONFIGS[codec].get("pixel_format"))
 
             # For FFV1, use RGB24 to avoid YUV conversion issues
             if codec == "ffv1":
@@ -434,14 +443,15 @@ class CodecConfig:
 
         if codec in self.IMAGE_CODEC_CONFIGS:
             # Video/image codec - only use video-specific options
-            default_options = self.IMAGE_CODEC_CONFIGS[codec].get(
-                "options", {}).copy()
+            options_dict = self.IMAGE_CODEC_CONFIGS[codec].get("options", {})
+            default_options = cast(Dict[str, Any], options_dict).copy()
             # Only merge video-specific custom options
             default_options.update(self.video_custom_options)
         elif codec in self.RAW_DATA_CODEC_CONFIGS:
             # Raw data codec - only use raw-specific options
-            default_options = (self.RAW_DATA_CODEC_CONFIGS[codec].get(
-                "options", {}).copy())
+            options_dict = self.RAW_DATA_CODEC_CONFIGS[codec].get(
+                "options", {})
+            default_options = cast(Dict[str, Any], options_dict).copy()
             # Only merge raw-specific custom options
             default_options.update(self.raw_custom_options)
 
@@ -451,7 +461,7 @@ class CodecConfig:
     def for_transcoding_to_internal_codec(
             cls,
             internal_codec: str,
-            codec_options: Optional[Dict[str, Any]] = None) -> "CodecConfig":
+            codec_options: Optional[Dict[str, Any]] = None) -> Any:
         """Create a CodecConfig specifically for transcoding to a particular internal codec.
 
         This is used during transcoding operations where we need to convert between

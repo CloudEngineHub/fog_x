@@ -5,7 +5,7 @@ This module provides pre-defined configurations for common use cases
 and helper functions for creating custom configurations.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 def create_vision_config(model: str = "qwen2.5-7b",
@@ -108,7 +108,7 @@ def create_custom_config(
     Returns:
         Custom configuration dictionary
     """
-    config = {}
+    config: Dict[str, Any] = {}
 
     if tool_parameters:
         config["tools"] = tool_parameters
@@ -232,7 +232,7 @@ def merge_configs(*configs: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Merged configuration dictionary
     """
-    result = {}
+    result: Dict[str, Any] = {}
 
     for config in configs:
         if not isinstance(config, dict):
@@ -289,7 +289,7 @@ def get_default_config() -> Dict[str, Any]:
 
 
 # Configuration presets for common scenarios
-PRESET_CONFIGS = {
+PRESET_CONFIGS: Dict[str, Callable[..., Dict[str, Any]]] = {
     "vision": create_vision_config,
     "analysis": create_analysis_config,
     "minimal": create_minimal_config,

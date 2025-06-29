@@ -231,7 +231,7 @@ class PyArrowBatchCodec(RawDataCodec):
 class PyAVVideoCodec(VideoCodec):
     """PyAV-based video codec wrapper"""
 
-    def __init__(self, codec_name: str = None, **kwargs):
+    def __init__(self, codec_name: Optional[str] = None, **kwargs):
         # Handle both old and new initialization styles
         if codec_name is None:
             # New style: codec name should be passed as kwarg or inferred from registration

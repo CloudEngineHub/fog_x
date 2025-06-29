@@ -128,7 +128,7 @@ class Executor:
                     batch_dict = batch
 
                 batch_size = len(next(iter(batch_dict.values())))
-                transformed_batch = {}
+                transformed_batch: Dict[str, List[Any]] = {}
 
                 for i in range(batch_size):
                     # Extract single trajectory from batch

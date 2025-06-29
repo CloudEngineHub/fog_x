@@ -92,7 +92,7 @@ class VLADataset:
 
         # Cache for schema and stats
         self._schema = None
-        self._stats = None
+        self._stats: Optional[Dict[str, Any]] = None
 
     @classmethod
     def create_trajectory_dataset(
@@ -260,16 +260,22 @@ class VLADataset:
                 }
 
                 # Add mode-specific stats
+                assert (self._stats is not None
+                        )  # Type checker hint - _stats was just assigned above
                 if self.mode == LoadingMode.TRAJECTORY:
                     # For trajectory mode, estimate length from first key
-                    first_key = next(iter(sample.keys())) if sample else None
-                    if first_key and hasattr(sample[first_key], "__len__"):
+                    first_key = (next(iter(sample.keys())) if sample
+                                 and isinstance(sample, dict) else None)
+                    if first_key and sample and hasattr(
+                            sample[first_key], "__len__"):
                         self._stats["trajectory_length"] = len(
                             sample[first_key])
                 elif self.mode == LoadingMode.SLICE:
                     # For slice mode, estimate length from first key
-                    first_key = next(iter(sample.keys())) if sample else None
-                    if first_key and hasattr(sample[first_key], "__len__"):
+                    first_key = (next(iter(sample.keys())) if sample
+                                 and isinstance(sample, dict) else None)
+                    if first_key and sample and hasattr(
+                            sample[first_key], "__len__"):
                         self._stats["slice_length"] = len(sample[first_key])
                         self._stats["slice_start"] = (
                             0  # Cannot determine from direct data
@@ -278,6 +284,9 @@ class VLADataset:
             else:
                 self._stats = {"mode": self.mode.value, "total_items": 0}
 
+        assert (
+            self._stats is not None
+        )  # Type checker hint - _stats is always assigned in this method
         return self._stats
 
     def peek(self) -> Optional[Dict[str, Any]]:

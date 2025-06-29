@@ -122,7 +122,7 @@ class IteratorAdapter(DataIngestionInterface):
         self.group_size = group_size
         self.max_items = max_items
         self.trajectory_name_fn = trajectory_name_fn
-        self._cached_items = None
+        self._cached_items: Optional[List[Any]] = None
 
     def get_data_items(self) -> List[Any]:
         """Consume iterator and cache items."""

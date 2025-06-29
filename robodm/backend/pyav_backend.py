@@ -62,7 +62,9 @@ class PyAVBackend(ContainerBackend):
              mode: str) -> None:  # noqa: D401  (docstring inherited)
         if mode not in {"r", "w"}:
             raise ValueError("mode must be 'r' or 'w'")
-        self.container = av.open(path, mode=mode, format=self.container_format)
+        self.container = av.open(
+            path, mode=mode,
+            format=self.container_format)  # type: ignore[call-overload]
         # Populate mapping for existing streams (in read mode).
         if mode == "r":
             self._idx_to_stream = {
@@ -72,7 +74,7 @@ class PyAVBackend(ContainerBackend):
 
     def close(self) -> None:
         if self.container is not None:
-            self.container.close()
+            self.container.close()  # type: ignore[attr-defined]
             self.container = None
             self._idx_to_stream.clear()
             self.codec_manager.clear_stream_codecs()
@@ -83,7 +85,8 @@ class PyAVBackend(ContainerBackend):
             fn = stream.metadata.get("FEATURE_NAME", f"stream_{idx}")
             ft = stream.metadata.get("FEATURE_TYPE", "unknown")
             enc = stream.codec_context.codec.name
-            tb = (stream.time_base.numerator, stream.time_base.denominator)
+            tb = ((stream.time_base.numerator, stream.time_base.denominator)
+                  if stream.time_base is not None else (1, 1000))
             out.append(
                 StreamMetadata(
                     feature_name=fn,
@@ -169,8 +172,10 @@ class PyAVBackend(ContainerBackend):
                             dts=pkt.dts,
                             stream_index=stream_index,
                             time_base=(
-                                stream.time_base.numerator,
-                                stream.time_base.denominator,
+                                (stream.time_base.numerator
+                                 if stream.time_base is not None else 1),
+                                (stream.time_base.denominator
+                                 if stream.time_base is not None else 1000),
                             ),
                             is_keyframe=(bool(pkt.is_keyframe) if hasattr(
                                 pkt, "is_keyframe") else False),
@@ -210,8 +215,10 @@ class PyAVBackend(ContainerBackend):
                         dts=pkt.dts,
                         stream_index=stream_index,
                         time_base=(
-                            stream.time_base.numerator,
-                            stream.time_base.denominator,
+                            (stream.time_base.numerator
+                             if stream.time_base is not None else 1),
+                            (stream.time_base.denominator
+                             if stream.time_base is not None else 1000),
                         ),
                         is_keyframe=(bool(pkt.is_keyframe) if hasattr(
                             pkt, "is_keyframe") else False),
@@ -231,8 +238,10 @@ class PyAVBackend(ContainerBackend):
                     dts=timestamp,
                     stream_index=stream_index,
                     time_base=(
-                        stream.time_base.numerator,
-                        stream.time_base.denominator,
+                        (stream.time_base.numerator
+                         if stream.time_base is not None else 1),
+                        (stream.time_base.denominator
+                         if stream.time_base is not None else 1000),
                     ),
                     is_keyframe=True,
                 )
@@ -269,8 +278,10 @@ class PyAVBackend(ContainerBackend):
                         dts=pkt.dts,
                         stream_index=stream_index,
                         time_base=(
-                            stream.time_base.numerator,
-                            stream.time_base.denominator,
+                            (stream.time_base.numerator
+                             if stream.time_base is not None else 1),
+                            (stream.time_base.denominator
+                             if stream.time_base is not None else 1000),
                         ),
                         is_keyframe=(bool(pkt.is_keyframe) if hasattr(
                             pkt, "is_keyframe") else False),
@@ -297,7 +308,7 @@ class PyAVBackend(ContainerBackend):
         pkt.time_base = Fraction(*packet_info.time_base)
         pkt.stream = self._idx_to_stream[packet_info.stream_index]
 
-        self.container.mux(pkt)
+        self.container.mux(pkt)  # type: ignore[attr-defined]
 
     def transcode_container(
         self,
@@ -436,8 +447,8 @@ class PyAVBackend(ContainerBackend):
 
         logger.debug(f"Transcoding complete: {packets_muxed} packets muxed")
 
-        input_container.close()
-        output_container.close()
+        input_container.close()  # type: ignore[attr-defined]
+        output_container.close()  # type: ignore[attr-defined]
 
     def create_container_with_new_streams(
         self,
@@ -481,11 +492,11 @@ class PyAVBackend(ContainerBackend):
                 packet.stream = new_container.streams[new_stream_idx]
                 new_container.mux(packet)
 
-        original_container.close()
+        original_container.close()  # type: ignore[attr-defined]
 
         # Keep new container open and update our state
         if self.container is not None:
-            self.container.close()
+            self.container.close()  # type: ignore[attr-defined]
         self.container = new_container
         self._idx_to_stream = {s.index: s for s in new_container.streams}
 
@@ -506,7 +517,7 @@ class PyAVBackend(ContainerBackend):
             self._idx_to_stream[idx] for idx in stream_indices
             if idx in self._idx_to_stream
         ]
-        return self.container.demux(streams)
+        return self.container.demux(streams)  # type: ignore[attr-defined]
 
     def seek_container(self,
                        timestamp: int,
@@ -519,11 +530,12 @@ class PyAVBackend(ContainerBackend):
             raise ValueError(f"No stream with index {stream_index}")
 
         stream = self._idx_to_stream[stream_index]
-        self.container.seek(timestamp, stream=stream, any_frame=any_frame)
+        self.container.seek(timestamp, stream=stream,
+                            any_frame=any_frame)  # type: ignore[attr-defined]
 
     def decode_stream_frames(self,
                              stream_index: int,
-                             packet_data: bytes = None) -> List[Any]:
+                             packet_data: Optional[bytes] = None) -> List[Any]:
         """Decode frames from a stream, optionally with packet data"""
         if stream_index not in self._idx_to_stream:
             raise ValueError(f"No stream with index {stream_index}")
@@ -532,7 +544,7 @@ class PyAVBackend(ContainerBackend):
 
         if packet_data is None:
             # Flush decoder
-            return list(stream.decode(None))
+            return list(stream.decode(None))  # type: ignore[attr-defined]
         else:
             # Decode specific packet
             pkt = av.Packet(packet_data)
@@ -620,19 +632,22 @@ class PyAVBackend(ContainerBackend):
         container_codec = codec_config.get_container_codec(selected_codec)
 
         # Create stream with container codec
-        stream = self.container.add_stream(container_codec)
+        stream = self.container.add_stream(
+            container_codec)  # type: ignore[attr-defined]
 
         # Configure stream for image codecs
         if codec_config.is_image_codec(container_codec):
             shape = feature_type.shape
             if shape is not None and len(shape) >= 2:
-                stream.width = shape[1]
-                stream.height = shape[0]
+                # Only set width/height for video streams
+                if hasattr(stream, "width") and hasattr(stream, "height"):
+                    stream.width = shape[1]  # type: ignore[attr-defined]
+                    stream.height = shape[0]  # type: ignore[attr-defined]
 
             pixel_fmt = codec_config.get_pixel_format(selected_codec,
                                                       feature_type)
-            if pixel_fmt:
-                stream.pix_fmt = pixel_fmt
+            if pixel_fmt and hasattr(stream, "pix_fmt"):
+                stream.pix_fmt = pixel_fmt  # type: ignore[attr-defined]
 
             codec_opts = codec_config.get_codec_options(selected_codec)
             if codec_opts:
@@ -669,17 +684,19 @@ class PyAVBackend(ContainerBackend):
 
         # Configure image codec settings
         if config.encoding in {"ffv1", "libaom-av1", "libx264", "libx265"}:
-            if config.width and config.height:
-                stream.width = config.width
-                stream.height = config.height
-            elif hasattr(config.feature_type, "shape"):
+            if (config.width and config.height and hasattr(stream, "width")
+                    and hasattr(stream, "height")):
+                stream.width = config.width  # type: ignore[attr-defined]
+                stream.height = config.height  # type: ignore[attr-defined]
+            elif (hasattr(config.feature_type, "shape")
+                  and hasattr(stream, "width") and hasattr(stream, "height")):
                 shape = getattr(config.feature_type, "shape", None)
                 if shape and len(shape) >= 2:
-                    stream.width = shape[1]
-                    stream.height = shape[0]
+                    stream.width = shape[1]  # type: ignore[attr-defined]
+                    stream.height = shape[0]  # type: ignore[attr-defined]
 
-            if config.pixel_format:
-                stream.pix_fmt = config.pixel_format
+            if config.pixel_format and hasattr(stream, "pix_fmt"):
+                stream.pix_fmt = config.pixel_format  # type: ignore[attr-defined]
 
             if config.codec_options:
                 # Convert all option values to strings since PyAV expects string values
@@ -1081,5 +1098,5 @@ class PyAVBackend(ContainerBackend):
                     # Update timestamp for this feature
                     time_interval = feature_time_intervals.get(
                         feature_name, 1000.0 / default_fps)
-                    feature_timestamps[
-                        feature_name] = current_timestamp + time_interval
+                    feature_timestamps[feature_name] = int(current_timestamp +
+                                                           time_interval)

@@ -106,8 +106,8 @@ class RayVLALoader(BaseLoader):
             self.slice_config = SliceConfig()
 
         # Initialize metadata manager if using metadata
-        self.metadata_manager = None
-        self.metadata_cache = {}
+        self.metadata_manager: Optional[MetadataManager] = None
+        self.metadata_cache: Dict[str, Any] = {}
         if self.use_metadata:
             self._initialize_metadata()
 

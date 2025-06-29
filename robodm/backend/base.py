@@ -13,7 +13,7 @@ class StreamMetadata:
     feature_type: str  # Using string to avoid circular imports with FeatureType
     encoding: str
     time_base: tuple[int, int]  # Numerator, denominator for time base fraction
-    additional_metadata: Dict[str, str] = None
+    additional_metadata: Optional[Dict[str, str]] = None
 
 
 @dataclass
@@ -176,7 +176,7 @@ class ContainerBackend(ABC):
     @abstractmethod
     def decode_stream_frames(self,
                              stream_index: int,
-                             packet_data: bytes = None) -> List[Any]:
+                             packet_data: Optional[bytes] = None) -> List[Any]:
         """Decode frames from a stream, optionally with packet data
 
         Args:
