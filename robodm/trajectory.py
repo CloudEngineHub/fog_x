@@ -18,6 +18,7 @@ from robodm import FeatureType
 from robodm.backend.base import ContainerBackend
 # Backend abstraction
 from robodm.backend.pyav_backend import PyAVBackend
+from robodm.backend.parquet_backend import ParquetBackend
 from robodm.trajectory_base import TrajectoryInterface
 from robodm.utils.flatten import _flatten_dict
 
@@ -59,7 +60,7 @@ class Trajectory(TrajectoryInterface):
         time_unit: str = "ms",
         enforce_monotonic: bool = True,
         visualization_feature: Optional[Text] = None,
-        backend: Optional[ContainerBackend] = None,
+        backend: Optional[Union[ContainerBackend, str]] = None,
         raw_codec: Optional[str] = None,
     ) -> None:
         """
@@ -78,7 +79,7 @@ class Trajectory(TrajectoryInterface):
             enforce_monotonic: Whether to enforce monotonically increasing timestamps
             visualization_feature: Optional feature name to prioritize as first stream for visualization.
                 If None, automatically puts video-encoded streams first during compacting.
-            backend: Optional container backend for dependency injection
+            backend: Optional container backend for dependency injection. Can be a ContainerBackend instance or string ("parquet", "pyav")
             raw_codec (str, optional): Raw codec to use for non-image features. Options: "rawvideo", "rawvideo_pickle", "rawvideo_pyarrow". Defaults to None (will use video_codec).
         """
         self.path = path
@@ -116,7 +117,20 @@ class Trajectory(TrajectoryInterface):
         # ------------------------------------------------------------------ #
         # Container backend setup
         # ------------------------------------------------------------------ #
-        self.backend: ContainerBackend = backend or PyAVBackend()
+        if backend is None:
+            # Default to PyAV backend for backward compatibility
+            self.backend: ContainerBackend = PyAVBackend()
+        elif isinstance(backend, str):
+            # Allow string specification of backend type
+            if backend.lower() == "parquet":
+                self.backend = ParquetBackend()
+            elif backend.lower() == "pyav":
+                self.backend = PyAVBackend()
+            else:
+                raise ValueError(f"Unknown backend type: {backend}. Use 'parquet' or 'pyav'")
+        else:
+            # Use provided backend instance
+            self.backend = backend
 
         # check if the path exists
         # if not, create a new file and start data collection
@@ -977,6 +991,41 @@ class Trajectory(TrajectoryInterface):
         # Set the final value
         current[keys[-1]] = value
         return data_dict
+
+    @classmethod
+    def from_aligned_data(
+        cls,
+        data: List[Dict[str, Any]],
+        path: Text,
+        feature_name_separator: Text = "/",
+    ) -> "Trajectory":
+        """
+        Create a Trajectory with parquet backend from aligned data.
+        
+        Args:
+            data: List of dictionaries with aligned timestamps and features
+                  Format: [{"timestamp": ts, "feature1": val1, "feature2": val2}, ...]
+            path: Path to the parquet file
+            feature_name_separator: Separator for nested feature names
+            
+        Returns:
+            Trajectory instance with parquet backend
+        """
+        if not data:
+            raise ValueError("Data list cannot be empty")
+            
+        traj = cls(path, mode="w", backend="parquet", 
+                  feature_name_separator=feature_name_separator)
+        
+        # Add aligned rows directly to parquet backend
+        for row in data:
+            timestamp = row.pop("timestamp", None)
+            if timestamp is None:
+                raise ValueError("Each row must contain a 'timestamp' field")
+            traj.backend.add_aligned_row(timestamp, row)
+            
+        traj.close()
+        return traj
 
     def _transcode_by_feature_type(self):
         """
