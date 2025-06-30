@@ -104,12 +104,12 @@ class VLADataset:
         # Create dataset from file paths and load trajectories
         dataset = rd.from_items(self.file_paths)
         
-        # Map each file to its trajectory data
-        dataset = dataset.map(
-            self._load_trajectory,
-            num_cpus=self.config.num_parallel_reads,
-            concurrency=self.config.num_parallel_reads,
-        )
+        # # Map each file to its trajectory data
+        # dataset = dataset.map(
+        #     self._load_trajectory,
+        #     num_cpus=self.config.num_parallel_reads,
+        #     concurrency=self.config.num_parallel_reads,
+        # )
 
         # Apply shuffling if requested
         if self.config.shuffle:
