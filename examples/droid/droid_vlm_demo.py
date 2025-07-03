@@ -1,10 +1,10 @@
 """
-Demo script using robo2vlm tool to classify DROID trajectories as successful or failed.
+Demo script using Llama 3.2-Vision model to classify DROID trajectories as successful or failed.
 
 This script:
 1. Downloads sample DROID trajectories (both success and failure)
 2. Converts them to RoboDM format
-3. Uses the robo2vlm vision-language model to analyze trajectories
+3. Uses the Llama 3.2-Vision model to analyze trajectories
 4. Demonstrates how to detect success/failure patterns
 """
 
@@ -13,26 +13,102 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
+import torch
+from PIL import Image
+from transformers import MllamaForConditionalGeneration, AutoProcessor
 from download_droid import DROIDDownloader
 from droid_to_robodm import DROIDToRoboDMConverter
 
 import robodm
-from robodm.agent.tools import ToolsManager, create_vision_config
 
 
 class DROIDSuccessDetector:
-    """Detect success/failure in DROID trajectories using VLM."""
+    """Detect success/failure in DROID trajectories using Llama 3.2-Vision."""
 
     def __init__(self):
-        # Initialize tools manager with vision config
-        self.manager = ToolsManager(config=create_vision_config())
-        self.vlm_tool = self.manager.get_tool("robo2vlm")
+        # Initialize Llama 3.2-Vision model directly
+        print("Loading Llama 3.2-Vision model...")
+        self.model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+        
+        # Load model and processor
+        self.model = MllamaForConditionalGeneration.from_pretrained(
+            self.model_name,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True
+        )
+        
+        self.processor = AutoProcessor.from_pretrained(
+            self.model_name,
+            trust_remote_code=True
+        )
+        
+        print("Model loaded successfully!")
+
+    def analyze_frame_with_llama_vision(self, image: np.ndarray, prompt: str) -> str:
+        """
+        Analyze a single frame using Llama 3.2-Vision.
+        
+        Args:
+            image: Frame as numpy array (H, W, C)
+            prompt: Text prompt for analysis
+            
+        Returns:
+            Model response
+        """
+        try:
+            # Convert numpy array to PIL Image
+            if image.dtype != np.uint8:
+                image = (image * 255).astype(np.uint8)
+            pil_image = Image.fromarray(image)
+            
+            # Create conversation format for Llama 3.2-Vision
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": prompt}
+                    ]
+                }
+            ]
+            
+            # Process inputs
+            text = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True
+            )
+            
+            inputs = self.processor(
+                images=[pil_image], 
+                text=text, 
+                return_tensors="pt"
+            ).to(self.model.device)
+            
+            # Generate response
+            with torch.no_grad():
+                output = self.model.generate(
+                    **inputs,
+                    max_new_tokens=100,
+                    do_sample=False,
+                    temperature=0.1
+                )
+            
+            # Decode response (skip the input tokens)
+            generated_ids = output[0][inputs.input_ids.shape[1]:]
+            response = self.processor.decode(generated_ids, skip_special_tokens=True)
+            
+            print(f"Response: {response.strip()}")
+            return response.strip()
+            
+        except Exception as e:
+            print(f"Error analyzing frame: {e}")
+            return "Error"
 
     def analyze_trajectory_frames(self,
                                   trajectory_path: str,
                                   sample_rate: int = 10) -> Dict:
         """
-        Analyze frames from a trajectory using VLM.
+        Analyze frames from a trajectory using Llama 3.2-Vision.
 
         Args:
             trajectory_path: Path to RoboDM trajectory file
@@ -81,14 +157,8 @@ class DROIDSuccessDetector:
             frame_analysis = {"frame_idx": idx, "analyses": {}}
 
             for prompt in prompts:
-                try:
-                    response = self.vlm_tool(frame, prompt)
-                    frame_analysis["analyses"][prompt] = response
-                except Exception as e:
-                    print(
-                        f"Error analyzing frame {idx} with prompt '{prompt}': {e}"
-                    )
-                    frame_analysis["analyses"][prompt] = "Error"
+                response = self.analyze_frame_with_llama_vision(frame, prompt)
+                frame_analysis["analyses"][prompt] = response
 
             results["frame_analyses"].append(frame_analysis)
 
@@ -269,8 +339,8 @@ def main():
     else:
         print(f"Using existing RoboDM trajectories in {robodm_dir}")
 
-    # Step 3: Analyze trajectories with VLM
-    print("\n3. Analyzing trajectories with robo2vlm...")
+    # Step 3: Analyze trajectories with Llama 3.2-Vision
+    print("\n3. Analyzing trajectories with Llama 3.2-Vision...")
     detector = DROIDSuccessDetector()
 
     # Get converted trajectory paths
@@ -285,11 +355,11 @@ def main():
 
     print("\n" + "=" * 60)
     print(
-        "Demo complete! The robo2vlm tool successfully analyzed DROID trajectories."
+        "Demo complete! The Llama 3.2-Vision model successfully analyzed DROID trajectories."
     )
     print("\nKey insights:")
     print(
-        "- VLM can detect task completion indicators in robotic trajectories")
+        "- Llama 3.2-Vision can detect task completion indicators in robotic trajectories")
     print("- Success/failure patterns can be identified from visual analysis")
     print("- Frame-by-frame analysis provides detailed task understanding")
 

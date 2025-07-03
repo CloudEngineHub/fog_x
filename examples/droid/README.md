@@ -38,7 +38,7 @@ python droid_to_robodm.py
 
 - gsutil (for downloading from Google Cloud Storage)
 - RoboDM with vision tools enabled
-- VLM model (qwen2.5-7b by default)
+- VLM model (Llama 3.2-Vision2.5-7b by default)
 
 ## Sample Output
 

@@ -8,7 +8,7 @@ and helper functions for creating custom configurations.
 from typing import Any, Callable, Dict, List, Optional
 
 
-def create_vision_config(model: str = "qwen2.5-7b",
+def create_vision_config(model: str = "Llama 3.2-Vision",
                          temperature: float = 0.05,
                          max_tokens: int = 512) -> Dict[str, Any]:
     """
@@ -70,7 +70,7 @@ def create_analysis_config(
     }
 
 
-def create_minimal_config(model: str = "qwen2.5-7b") -> Dict[str, Any]:
+def create_minimal_config(model: str = "Llama 3.2-Vision") -> Dict[str, Any]:
     """
     Create minimal configuration with only essential tools.
 
@@ -270,7 +270,7 @@ def get_default_config() -> Dict[str, Any]:
     return {
         "tools": {
             "robo2vlm": {
-                "model": "qwen2.5-7b",
+                "model": "Llama 3.2-Vision",
                 "temperature": 0.1,
                 "max_tokens": 256
             },

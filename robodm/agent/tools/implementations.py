@@ -78,12 +78,22 @@ class VisionLanguageModel:
     """Vision-language model for analyzing images."""
 
     def __init__(self,
-                 model: str = "qwen2.5-7b",
+                 model: str = "Llama 3.2-Vision",
                  temperature: float = 0.1,
-                 max_tokens: int = 256):
+                 max_tokens: int = 256,
+                 trust_remote_code: bool = False,
+                 dtype: str = "auto",
+                 enforce_eager: bool = False,
+                 max_model_len: Optional[int] = None,
+                 **kwargs):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.trust_remote_code = trust_remote_code
+        self.dtype = dtype
+        self.enforce_eager = enforce_eager
+        self.max_model_len = max_model_len
+        self.extra_kwargs = kwargs
         self._vlm_instance = None
         self._sampling_params = SamplingParams(
             temperature=temperature,
@@ -95,7 +105,22 @@ class VisionLanguageModel:
     def _get_vlm_instance(self) -> LLM:
         """Get or create VLM instance."""
         if self._vlm_instance is None:
-            self._vlm_instance = LLM(model=self.model)
+            # Build LLM parameters
+            llm_kwargs = {"model": self.model}
+            
+            if self.trust_remote_code:
+                llm_kwargs["trust_remote_code"] = self.trust_remote_code
+            if self.dtype != "auto":
+                llm_kwargs["dtype"] = self.dtype
+            if self.enforce_eager:
+                llm_kwargs["enforce_eager"] = self.enforce_eager
+            if self.max_model_len is not None:
+                llm_kwargs["max_model_len"] = self.max_model_len
+            
+            # Add any extra kwargs
+            llm_kwargs.update(self.extra_kwargs)
+            
+            self._vlm_instance = LLM(**llm_kwargs)
         return self._vlm_instance
 
     def _image_to_base64(self, image: Union[np.ndarray, Image.Image]) -> str:
@@ -372,7 +397,7 @@ class VisionLanguageModelTool(BaseTool):
 
     def __init__(
         self,
-        model: str = "qwen2.5-7b",
+        model: str = "Llama 3.2-Vision",
         temperature: float = 0.1,
         max_tokens: int = 256,
         **kwargs,
@@ -416,7 +441,7 @@ class VisionLanguageModelTool(BaseTool):
             ],
             tags=["vision", "language", "analysis", "robotic"],
             parameters={
-                "model": "qwen2.5-7b",
+                "model": "Llama 3.2-Vision",
                 "temperature": 0.1,
                 "max_tokens": 256
             },

@@ -23,7 +23,7 @@ class Agent:
     def __init__(
         self,
         dataset: Dataset,
-        llm_model: str = "qwen2.5-7b",
+        llm_model: str = "Llama 3.2-Vision2.5-7b",
         tools_config: Optional[Dict[str, Any]] = None,
     ):
         """
@@ -31,7 +31,7 @@ class Agent:
 
         Args:
             dataset: Ray Dataset containing trajectory data
-            llm_model: Model name for LLM-based planning (default: qwen2.5-7b)
+            llm_model: Model name for LLM-based planning (default: Llama 3.2-Vision2.5-7b)
             tools_config: Configuration for tools system (can be dict or preset name)
         """
         self.dataset = dataset

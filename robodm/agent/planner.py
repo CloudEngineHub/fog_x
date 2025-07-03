@@ -45,12 +45,12 @@ class Planner:
     Dynamically adapts to dataset schema.
     """
 
-    def __init__(self, llm_model: str = "qwen2.5-7b", tools_manager=None):
+    def __init__(self, llm_model: str = "Llama 3.2-Vision", tools_manager=None):
         """
         Initialize Planner with specified LLM model.
 
         Args:
-            llm_model: Model name for code generation (default: qwen2.5-7b)
+            llm_model: Model name for code generation (default: Llama 3.2-Vision)
             tools_manager: ToolsManager instance for accessing tools
         """
         self.llm_model = llm_model
