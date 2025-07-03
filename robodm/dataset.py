@@ -121,9 +121,9 @@ class VLADataset:
         try:
             traj = robodm.Trajectory(file_path)
             data = traj.load(return_type=self.return_type)
-            
             # Add file path metadata for tracking
             data["__file_path__"] = str(file_path)
+            data["metadata"] = None
             
             return data
         except Exception as e:
