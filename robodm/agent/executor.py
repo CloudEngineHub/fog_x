@@ -74,11 +74,17 @@ class Executor:
                             f"Filter function failed for trajectory {i}: {e}")
                         keep_flags.append(False)
 
-                # Return in appropriate format
+                # Return original data WITH __keep__ column added
                 if isinstance(batch, pd.DataFrame):
-                    return pd.DataFrame({"__keep__": keep_flags})
+                    # Add __keep__ column to existing batch
+                    batch_with_keep = batch.copy()
+                    batch_with_keep["__keep__"] = keep_flags
+                    return batch_with_keep
                 else:
-                    return {"__keep__": keep_flags}
+                    # Add __keep__ column to existing batch_dict (copy to avoid mutation)
+                    batch_dict_with_keep = batch_dict.copy()
+                    batch_dict_with_keep["__keep__"] = keep_flags
+                    return batch_dict_with_keep
 
             # Apply filter using Ray's map_batches and filter
             filtered_dataset = dataset.map_batches(ray_filter_wrapper,
@@ -140,6 +146,13 @@ class Executor:
                     try:
                         # Apply map function
                         transformed_trajectory = map_func(trajectory)
+
+                        # Ensure the transformed result is a dictionary. If the
+                        # map function returns a scalar / list / bool we wrap it
+                        # into a dictionary under the generic key "result" so
+                        # that downstream operations have a consistent schema.
+                        if not isinstance(transformed_trajectory, dict):
+                            transformed_trajectory = {"result": transformed_trajectory}
 
                         # Accumulate results
                         for key, value in transformed_trajectory.items():
@@ -240,29 +253,24 @@ class Executor:
             # Get dataset count
             count = dataset.count()
 
+            # Use take() method instead of to_pandas() to avoid tensor casting issues
+            # This is more reliable for datasets with complex numpy arrays
             if count > max_trajectories:
                 logger.warning(
                     f"Dataset has {count} trajectories, sampling {max_trajectories}"
                 )
-                # Sample random trajectories
-                sampled_dataset = dataset.random_sample(max_trajectories /
-                                                        count)
-                trajectories_data = sampled_dataset.to_pandas()
+                # Sample random trajectories and take them
+                sampled_dataset = dataset.random_sample(max_trajectories / count)
+                trajectories = sampled_dataset.take(max_trajectories)
             else:
-                # Collect all trajectories
-                trajectories_data = dataset.to_pandas()
-
-            # Convert to list of dictionaries
-            trajectories = []
-            for idx, row in trajectories_data.iterrows():
-                trajectory = row.to_dict()
-                trajectories.append(trajectory)
+                # Collect all trajectories using take()
+                trajectories = dataset.take(count)
 
             return trajectories
 
         except Exception as e:
             logger.error(f"Failed to collect trajectories: {e}")
-            # Fallback: try to get individual items
+            # Final fallback: try to get a small number of items
             try:
                 return dataset.take(min(max_trajectories, 100))
             except:

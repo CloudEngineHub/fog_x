@@ -40,33 +40,7 @@ class MockImage:
         buffer.write(b"mock_image_data")
 
 
-try:
-    from vllm import LLM, SamplingParams
-except ImportError:
-
-    class LLM:
-
-        def __init__(self, model: str):
-            self.model = model
-
-        def generate(self, prompts, sampling_params):
-
-            class MockOutput:
-
-                def __init__(self):
-                    self.outputs = [MockGeneration()]
-
-            class MockGeneration:
-
-                def __init__(self):
-                    self.text = "Mock VLM response - vllm not installed"
-
-            return [MockOutput()]
-
-    class SamplingParams:
-
-        def __init__(self, **kwargs):
-            self.params = kwargs
+from ..vlm_service import get_vlm_service
 
 
 # =============================================================================
@@ -75,107 +49,34 @@ except ImportError:
 
 
 class VisionLanguageModel:
-    """Vision-language model for analyzing images."""
+    """Vision-language model for analyzing images using shared VLM service."""
 
     def __init__(self,
-                 model: str = "Llama 3.2-Vision",
+                 model: str = "Qwen/Qwen2.5-VL-3B-Instruct",
                  temperature: float = 0.1,
                  max_tokens: int = 256,
-                 trust_remote_code: bool = False,
-                 dtype: str = "auto",
-                 enforce_eager: bool = False,
-                 max_model_len: Optional[int] = None,
+                 trust_remote_code: bool = True,
                  **kwargs):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.trust_remote_code = trust_remote_code
-        self.dtype = dtype
-        self.enforce_eager = enforce_eager
-        self.max_model_len = max_model_len
         self.extra_kwargs = kwargs
-        self._vlm_instance = None
-        self._sampling_params = SamplingParams(
+        
+        # Initialize shared VLM service
+        self.vlm_service = get_vlm_service()
+        self.vlm_service.initialize(
+            model=model,
             temperature=temperature,
-            top_p=0.9,
             max_tokens=max_tokens,
-            stop=["<|endoftext|>", "<|im_end|>"],
+            trust_remote_code=trust_remote_code,
+            **kwargs
         )
-
-    def _get_vlm_instance(self) -> LLM:
-        """Get or create VLM instance."""
-        if self._vlm_instance is None:
-            # Build LLM parameters
-            llm_kwargs = {"model": self.model}
-            
-            if self.trust_remote_code:
-                llm_kwargs["trust_remote_code"] = self.trust_remote_code
-            if self.dtype != "auto":
-                llm_kwargs["dtype"] = self.dtype
-            if self.enforce_eager:
-                llm_kwargs["enforce_eager"] = self.enforce_eager
-            if self.max_model_len is not None:
-                llm_kwargs["max_model_len"] = self.max_model_len
-            
-            # Add any extra kwargs
-            llm_kwargs.update(self.extra_kwargs)
-            
-            self._vlm_instance = LLM(**llm_kwargs)
-        return self._vlm_instance
-
-    def _image_to_base64(self, image: Union[np.ndarray, Image.Image]) -> str:
-        """Convert image to base64 string."""
-        if isinstance(image, np.ndarray):
-            if image.dtype != np.uint8:
-                if image.max() <= 1.0:
-                    image = (image * 255).astype(np.uint8)
-                else:
-                    image = image.astype(np.uint8)
-
-            if len(image.shape) == 3 and image.shape[2] == 3:
-                pil_image = Image.fromarray(image, mode="RGB")
-            elif len(image.shape) == 3 and image.shape[2] == 4:
-                pil_image = Image.fromarray(image, mode="RGBA")
-            elif len(image.shape) == 2:
-                pil_image = Image.fromarray(image, mode="L")
-            else:
-                raise ValueError(f"Unsupported image shape: {image.shape}")
-        elif isinstance(image, Image.Image):
-            pil_image = image
-        else:
-            raise TypeError(f"Unsupported image type: {type(image)}")
-
-        buffer = io.BytesIO()
-        pil_image.save(buffer, format="PNG")
-        img_bytes = buffer.getvalue()
-        return base64.b64encode(img_bytes).decode("utf-8")
 
     def __call__(self, frame: Union[np.ndarray, Image.Image],
                  prompt: str) -> str:
-        """Analyze image with vision-language model."""
-        try:
-            vlm = self._get_vlm_instance()
-            image_b64 = self._image_to_base64(frame)
-
-            multimodal_prompt = [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{image_b64}"
-                    },
-                },
-                {
-                    "type": "text",
-                    "text": prompt
-                },
-            ]
-
-            outputs = vlm.generate([multimodal_prompt], self._sampling_params)
-            response = outputs[0].outputs[0].text.strip()
-            return response
-
-        except Exception as e:
-            return f"Error in robo2vlm: {str(e)}"
+        """Analyze image with shared VLM service."""
+        return self.vlm_service.analyze_image(frame, prompt)
 
 
 # =============================================================================
@@ -397,7 +298,7 @@ class VisionLanguageModelTool(BaseTool):
 
     def __init__(
         self,
-        model: str = "Llama 3.2-Vision",
+        model: str = "Qwen/Qwen2.5-VL-3B-Instruct",
         temperature: float = 0.1,
         max_tokens: int = 256,
         **kwargs,
@@ -416,15 +317,22 @@ class VisionLanguageModelTool(BaseTool):
                          max_tokens=max_tokens,
                          **kwargs)
 
-        self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self._vlm_instance = None
-        self._sampling_params = SamplingParams(
+        # Initialize shared VLM service
+        self.vlm_service = get_vlm_service()
+        self.vlm_service.initialize(
+            model=model,
             temperature=temperature,
-            top_p=0.9,
             max_tokens=max_tokens,
-            stop=["<|endoftext|>", "<|im_end|>"],
+            trust_remote_code=kwargs.get("trust_remote_code", True),
+            **kwargs
+        )
+        
+        self.vlm = VisionLanguageModel(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            trust_remote_code=kwargs.get("trust_remote_code", True),
+            **kwargs
         )
 
     @classmethod
@@ -441,7 +349,7 @@ class VisionLanguageModelTool(BaseTool):
             ],
             tags=["vision", "language", "analysis", "robotic"],
             parameters={
-                "model": "Llama 3.2-Vision",
+                "model": "Qwen/Qwen2.5-VL-3B-Instruct",
                 "temperature": 0.1,
                 "max_tokens": 256
             },
@@ -456,43 +364,10 @@ class VisionLanguageModelTool(BaseTool):
         if self.config.get("max_tokens", 256) <= 0:
             raise ValueError("max_tokens must be positive")
 
-    def _get_vlm_instance(self) -> LLM:
-        """Get or create VLM instance."""
-        if self._vlm_instance is None:
-            self._vlm_instance = LLM(model=self.model)
-        return self._vlm_instance
-
-    def _image_to_base64(self, image: Union[np.ndarray, Image.Image]) -> str:
-        """Convert image to base64 string."""
-        if isinstance(image, np.ndarray):
-            if image.dtype != np.uint8:
-                if image.max() <= 1.0:
-                    image = (image * 255).astype(np.uint8)
-                else:
-                    image = image.astype(np.uint8)
-
-            if len(image.shape) == 3 and image.shape[2] == 3:
-                pil_image = Image.fromarray(image, mode="RGB")
-            elif len(image.shape) == 3 and image.shape[2] == 4:
-                pil_image = Image.fromarray(image, mode="RGBA")
-            elif len(image.shape) == 2:
-                pil_image = Image.fromarray(image, mode="L")
-            else:
-                raise ValueError(f"Unsupported image shape: {image.shape}")
-        elif isinstance(image, Image.Image):
-            pil_image = image
-        else:
-            raise TypeError(f"Unsupported image type: {type(image)}")
-
-        buffer = io.BytesIO()
-        pil_image.save(buffer, format="PNG")
-        img_bytes = buffer.getvalue()
-        return base64.b64encode(img_bytes).decode("utf-8")
-
     def __call__(self, frame: Union[np.ndarray, Image.Image],
                  prompt: str) -> str:
         """
-        Analyze image with vision-language model.
+        Analyze image with SGLang vision-language model.
 
         Args:
             frame: Input image as numpy array or PIL Image
@@ -501,47 +376,31 @@ class VisionLanguageModelTool(BaseTool):
         Returns:
             String response from the vision-language model
         """
-        try:
-            vlm = self._get_vlm_instance()
-            image_b64 = self._image_to_base64(frame)
-
-            multimodal_prompt = [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{image_b64}"
-                    },
-                },
-                {
-                    "type": "text",
-                    "text": prompt
-                },
-            ]
-
-            outputs = vlm.generate([multimodal_prompt], self._sampling_params)
-            response = outputs[0].outputs[0].text.strip()
-            return response
-
-        except Exception as e:
-            return f"Error in robo2vlm: {str(e)}"
+        return self.vlm(frame, prompt)
 
     def reconfigure(self, **kwargs):
         """Reconfigure the tool with new parameters."""
         super().reconfigure(**kwargs)
-
-        # Update sampling parameters if temperature or max_tokens changed
-        if "temperature" in kwargs or "max_tokens" in kwargs:
-            self._sampling_params = SamplingParams(
-                temperature=self.config.get("temperature", 0.1),
-                top_p=0.9,
-                max_tokens=self.config.get("max_tokens", 256),
-                stop=["<|endoftext|>", "<|im_end|>"],
-            )
-
-        # Reset VLM instance if model changed
-        if "model" in kwargs:
-            self._vlm_instance = None
-            self.model = kwargs["model"]
+        
+        # Reinitialize shared VLM service with new config
+        self.vlm_service.initialize(
+            model=self.config.get("model", "Qwen/Qwen2.5-VL-3B-Instruct"),
+            temperature=self.config.get("temperature", 0.1),
+            max_tokens=self.config.get("max_tokens", 256),
+            trust_remote_code=self.config.get("trust_remote_code", True),
+            **{k: v for k, v in self.config.items() 
+               if k not in ["model", "temperature", "max_tokens", "trust_remote_code"]}
+        )
+        
+        # Recreate VLM instance with new config
+        self.vlm = VisionLanguageModel(
+            model=self.config.get("model", "Qwen/Qwen2.5-VL-3B-Instruct"),
+            temperature=self.config.get("temperature", 0.1),
+            max_tokens=self.config.get("max_tokens", 256),
+            trust_remote_code=self.config.get("trust_remote_code", True),
+            **{k: v for k, v in self.config.items() 
+               if k not in ["model", "temperature", "max_tokens", "trust_remote_code"]}
+        )
 
 
 @register_tool

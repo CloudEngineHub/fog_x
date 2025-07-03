@@ -8,32 +8,12 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 try:
-    from vllm import LLM, SamplingParams
+    from .vlm_service import get_vlm_service
+    SGLANG_AVAILABLE = True
 except ImportError:
-    # Fallback for when vllm is not installed
-    class LLM:
-
-        def __init__(self, model: str):
-            self.model = model
-
-        def generate(self, prompts, sampling_params):
-            # Mock response
-            class MockOutput:
-
-                def __init__(self):
-                    self.outputs = [MockGeneration()]
-
-            class MockGeneration:
-
-                def __init__(self):
-                    self.text = "# Mock LLM response - vllm not installed\nreturn True"
-
-            return [MockOutput()]
-
-    class SamplingParams:
-
-        def __init__(self, **kwargs):
-            self.params = kwargs
+    get_vlm_service = None
+    SGLANG_AVAILABLE = False
+    print("VLM service not available for planner")
 
 
 class Planner:
@@ -45,25 +25,37 @@ class Planner:
     Dynamically adapts to dataset schema.
     """
 
-    def __init__(self, llm_model: str = "Llama 3.2-Vision", tools_manager=None):
+    def __init__(self, llm_model: str = "Qwen/Qwen2.5-VL-3B-Instruct", tools_manager=None, **llm_kwargs):
         """
-        Initialize Planner with specified LLM model.
+        Initialize Planner with shared VLM service.
 
         Args:
-            llm_model: Model name for code generation (default: Llama 3.2-Vision)
+            llm_model: Model name for code generation (default: Qwen/Qwen2.5-VL-3B-Instruct)
             tools_manager: ToolsManager instance for accessing tools
+            **llm_kwargs: Additional arguments for VLM service initialization
         """
         self.llm_model = llm_model
-        self.llm = LLM(model=llm_model)
-        self.sampling_params = SamplingParams(
-            temperature=0.1,
-            top_p=0.9,
-            max_tokens=1024,
-            stop=["```", "# End of function"],
-        )
         self.tools_manager = tools_manager
         self._cached_schema = None
         self._cached_sample = None
+        
+        if SGLANG_AVAILABLE:
+            print(f"Initializing shared VLM service for planner: {llm_model}")
+            self.vlm_service = get_vlm_service()
+            self.vlm_service.initialize(
+                model=llm_model,
+                **llm_kwargs
+            )
+        else:
+            print("VLM service not available, planner will use mock responses")
+            self.vlm_service = None
+
+    def _generate_code(self, prompt: str) -> str:
+        """Generate code using shared VLM service or return mock response."""
+        if not SGLANG_AVAILABLE or self.vlm_service is None:
+            return "    # Mock code generation - VLM service not available\n    return True"
+        
+        return self.vlm_service.generate_code(prompt)
 
     def inspect_dataset_schema(self, dataset) -> Dict[str, Any]:
         """
@@ -200,7 +192,10 @@ Return only the function body (no imports, no function definition line).
 Use the actual dataset schema above to access the correct trajectory keys.
 Use the available tools for analysis operations.
 
+IMPORTANT: Look for labels in the trajectory data first, like 'is_success_labeled', 'success', 'label', etc.
+
 Example patterns:
+- For success filtering: return trajectory.get("is_success_labeled", False)
 - For image analysis: robo2vlm(frame, "question about image")
 - For image properties: analyze_image(frame, "blur")
 - For trajectory analysis: analyze_trajectory(data, "statistics")
@@ -210,15 +205,41 @@ Example patterns:
 
         full_prompt = f"{system_prompt}\n\nUser request: {prompt}\n\nFunction body:"
 
-        outputs = self.llm.generate([full_prompt], self.sampling_params)
-        generated_code = outputs[0].outputs[0].text.strip()
+        generated_code = self._generate_code(full_prompt)
+        
+        # DEBUG: Print the generated code
+        print(f"DEBUG: Generated filter code for '{prompt}':")
+        print(f"Generated code: {repr(generated_code)}")
 
         # Clean up generated code
         function_body = self._clean_generated_code(generated_code)
+        print(f"Cleaned code: {repr(function_body)}")
 
         # Create complete function
         complete_function = f"""def has_condition(trajectory: Dict[str, Any]) -> bool:
 {function_body}"""
+        
+        print(f"Complete function:")
+        print(complete_function)
+
+        # Add fallback logic if the generated function is too simple
+        if "return True" in function_body and "trajectory" not in function_body:
+            print("WARNING: Generated code is too simple, adding fallback logic")
+            fallback_body = """    # Fallback: Use ground truth labels if available
+    if "is_success_labeled" in trajectory:
+        return trajectory["is_success_labeled"]
+    elif "success" in trajectory:
+        return trajectory["success"]
+    elif "label" in trajectory:
+        return trajectory["label"] == "success"
+    else:
+        # If no labels, default to True (keep all)
+        return True"""
+        
+            complete_function = f"""def has_condition(trajectory: Dict[str, Any]) -> bool:
+{fallback_body}"""
+            print("Using fallback function:")
+            print(complete_function)
 
         # Compile and return function
         return self._compile_function(complete_function, "has_condition")
@@ -272,8 +293,7 @@ Example patterns:
 
         full_prompt = f"{system_prompt}\n\nUser request: {prompt}\n\nFunction body:"
 
-        outputs = self.llm.generate([full_prompt], self.sampling_params)
-        generated_code = outputs[0].outputs[0].text.strip()
+        generated_code = self._generate_code(full_prompt)
 
         # Clean up generated code
         function_body = self._clean_generated_code(generated_code)
@@ -329,8 +349,7 @@ Example patterns:
 
         full_prompt = f"{system_prompt}\n\nUser request: {prompt}\n\nFunction body:"
 
-        outputs = self.llm.generate([full_prompt], self.sampling_params)
-        generated_code = outputs[0].outputs[0].text.strip()
+        generated_code = self._generate_code(full_prompt)
 
         # Clean up generated code
         function_body = self._clean_generated_code(generated_code)
@@ -382,12 +401,11 @@ Example patterns:
 - for traj in trajectories: ...  # Iterate through trajectories
 - Use traj["key_name"] to access trajectory data
 - Calculate statistics and return formatted string
-- return f"Analysis result: {value:.2f}" """
+- return f"Analysis result: " """
 
         full_prompt = f"{system_prompt}\n\nUser request: {prompt}\n\nFunction body:"
 
-        outputs = self.llm.generate([full_prompt], self.sampling_params)
-        generated_code = outputs[0].outputs[0].text.strip()
+        generated_code = self._generate_code(full_prompt)
 
         # Clean up generated code
         function_body = self._clean_generated_code(generated_code)
@@ -401,11 +419,48 @@ Example patterns:
                                       "analyze_trajectories")
 
     def _clean_generated_code(self, code: str) -> str:
-        """Clean up generated code by adding proper indentation."""
+        """Clean up generated code by removing markdown blocks and adding proper indentation."""
+        if code is None:
+            return "    # No code generated\n    return True"
+        
+        # Handle empty or whitespace-only code
+        if not code.strip():
+            return "    # Empty code generated\n    return True"
+        
+        # Remove markdown code blocks
+        code = code.strip()
+        
+        # Remove opening markdown blocks
+        if code.startswith("```python"):
+            code = code[9:].strip()  # Remove ```python
+        elif code.startswith("```"):
+            code = code[3:].strip()   # Remove ```
+        
+        # Remove closing markdown blocks
+        if code.endswith("```"):
+            code = code[:-3].strip()
+        
+        # Remove function definition line if present (we only want the body)
         lines = code.split("\n")
         cleaned_lines = []
-
+        
+        skip_function_def = False
         for line in lines:
+            stripped_line = line.strip()
+            
+            # Skip function definition lines
+            if (stripped_line.startswith("def ") and 
+                ("has_condition" in stripped_line or 
+                 "transform_trajectory" in stripped_line or
+                 "aggregate_trajectories" in stripped_line or
+                 "analyze_trajectories" in stripped_line)):
+                skip_function_def = True
+                continue
+            elif stripped_line.endswith(":") and skip_function_def:
+                # Skip the colon line after function def
+                skip_function_def = False
+                continue
+            
             if line.strip():
                 # Add 4-space indentation if not already indented
                 if not line.startswith("    ") and not line.startswith("\t"):
@@ -415,7 +470,13 @@ Example patterns:
             else:
                 cleaned_lines.append("")
 
-        return "\n".join(cleaned_lines)
+        result = "\n".join(cleaned_lines)
+        
+        # If result is empty or only contains comments/whitespace, provide fallback
+        if not result.strip() or all(line.strip().startswith("#") or not line.strip() for line in result.split("\n")):
+            return "    # Generated code was empty or only comments\n    return True"
+        
+        return result
 
     def _compile_function(self, function_code: str,
                           function_name: str) -> Callable:

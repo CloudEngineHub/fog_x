@@ -25,6 +25,7 @@ class Agent:
         dataset: Dataset,
         llm_model: str = "Llama 3.2-Vision2.5-7b",
         tools_config: Optional[Dict[str, Any]] = None,
+        **llm_kwargs
     ):
         """
         Initialize Agent with a RoboDM Ray dataset.
@@ -33,6 +34,7 @@ class Agent:
             dataset: Ray Dataset containing trajectory data
             llm_model: Model name for LLM-based planning (default: Llama 3.2-Vision2.5-7b)
             tools_config: Configuration for tools system (can be dict or preset name)
+            **llm_kwargs: Additional LLM configuration (e.g., context_length, enforce_eager)
         """
         self.dataset = dataset
 
@@ -44,8 +46,10 @@ class Agent:
             # It's a configuration dict or None
             self.tools_manager = ToolsManager(config=tools_config)
 
+        # Pass LLM configuration to Planner
         self.planner = Planner(llm_model=llm_model,
-                               tools_manager=self.tools_manager)
+                               tools_manager=self.tools_manager,
+                               **llm_kwargs)
         self.executor = Executor(tools_manager=self.tools_manager)
 
     def filter(self, prompt: str) -> Dataset:

@@ -101,15 +101,8 @@ class VLADataset:
 
     def _create_dataset(self) -> rd.Dataset:
         """Create Ray dataset from file paths."""
-        # Create dataset from file paths and load trajectories
+        # Create dataset from file paths
         dataset = rd.from_items(self.file_paths)
-        
-        # # Map each file to its trajectory data
-        # dataset = dataset.map(
-        #     self._load_trajectory,
-        #     num_cpus=self.config.num_parallel_reads,
-        #     concurrency=self.config.num_parallel_reads,
-        # )
 
         # Apply shuffling if requested
         if self.config.shuffle:
@@ -263,6 +256,61 @@ class VLADataset:
         mapped_dataset._schema = None  # Schema might change after mapping
         mapped_dataset._stats = None
         return mapped_dataset
+    
+    def load_trajectories(self):
+        """Load trajectory data from file paths using map function."""
+        return self.map(
+            self._load_trajectory,
+            num_cpus=self.config.num_parallel_reads,
+            concurrency=self.config.num_parallel_reads,
+        )
+    
+    def _select_frame(self, item, frame_type: str = "last") -> Dict[str, Any]:
+        """Select a specific frame from trajectory data at query time."""
+        # Handle both string paths and loaded trajectory data
+        if isinstance(item, str) or (isinstance(item, dict) and "__file_path__" not in item):
+            # Load trajectory if not already loaded
+            trajectory_data = self._load_trajectory(item)
+        else:
+            trajectory_data = item
+            
+        # Find camera/image keys
+        camera_keys = [k for k in trajectory_data.keys() if "observation/images/" in k or "image" in k.lower()]
+        
+        result = {}
+        
+        # Copy non-trajectory data (metadata, etc.) and preserve trajectory metadata
+        for key, value in trajectory_data.items():
+            if key.startswith("__") or key not in camera_keys:
+                result[key] = value
+        
+        # Preserve additional trajectory metadata
+        if "__file_path__" in trajectory_data:
+            result["__file_path__"] = trajectory_data["__file_path__"]
+            result["__frame_type__"] = frame_type
+        
+        # Select frames based on frame_type
+        for camera_key in camera_keys:
+            frames = trajectory_data.get(camera_key, [])
+            if len(frames) == 0:
+                result[camera_key] = None
+                continue
+                
+            if frame_type == "first":
+                result[camera_key] = frames[0]
+            elif frame_type == "middle":
+                result[camera_key] = frames[len(frames) // 2]
+            elif frame_type == "last":
+                result[camera_key] = frames[-1]
+            else:
+                # Return all frames by default
+                result[camera_key] = frames
+                
+        return result
+    
+    def select_frames(self, frame_type: str = "last"):
+        """Create a dataset with selected frames at query time."""
+        return self.map(lambda item: self._select_frame(item, frame_type))
 
     def shuffle(self, seed: Optional[int] = None):
         """Shuffle the dataset."""
