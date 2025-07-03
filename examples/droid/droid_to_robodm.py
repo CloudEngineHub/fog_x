@@ -25,6 +25,33 @@ class DROIDToRoboDMConverter:
             "varied_camera_2_right_image",
         ]
 
+    def load_mp4_frames(self, mp4_path: str) -> np.ndarray:
+        """
+        Load all frames from an MP4 file.
+        
+        Args:
+            mp4_path: Path to MP4 file
+            
+        Returns:
+            Array of frames with shape (num_frames, height, width, channels)
+        """
+        if not os.path.exists(mp4_path):
+            return np.array([])
+            
+        cap = cv2.VideoCapture(mp4_path)
+        frames = []
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame_rgb)
+        
+        cap.release()
+        return np.array(frames)
+
     def load_droid_trajectory(self, droid_path: str) -> Dict:
         """
         Load a DROID trajectory from downloaded files.
@@ -75,19 +102,45 @@ class DROIDToRoboDMConverter:
                             trajectory_data["observations"][key] = np.array(
                                 robot_state[key])
 
-        # Load camera data from trajectory_im128.h5
-        traj_im_path = os.path.join(droid_path, "trajectory_im128.h5")
+        # Load camera data from MP4 files
         trajectory_data["images"] = {}
-
-        if os.path.exists(traj_im_path):
-            with h5py.File(traj_im_path, "r") as f:
-                if "observation/camera/image" in f:
-                    image_group = f["observation/camera/image"]
-                    for cam_name in self.camera_names:
-                        if cam_name in image_group:
-                            images = np.array(image_group[cam_name])
+        
+        # Map MP4 files to camera names using metadata
+        if "metadata" in trajectory_data:
+            metadata = trajectory_data["metadata"]
+            mp4_mappings = [
+                ("wrist_mp4_path", "hand_camera_left_image"),
+                ("ext1_mp4_path", "varied_camera_1_left_image"), 
+                ("ext2_mp4_path", "varied_camera_2_left_image"),
+            ]
+            
+            # Also handle stereo versions
+            stereo_mappings = [
+                ("wrist_mp4_path", "hand_camera_right_image"),
+                ("ext1_mp4_path", "varied_camera_1_right_image"),
+                ("ext2_mp4_path", "varied_camera_2_right_image"),
+            ]
+            
+            for mp4_key, cam_name in mp4_mappings:
+                if mp4_key in metadata:
+                    mp4_path = os.path.join(droid_path, "recordings", "MP4", 
+                                          os.path.basename(metadata[mp4_key]))
+                    if os.path.exists(mp4_path):
+                        images = self.load_mp4_frames(mp4_path)
+                        if len(images) > 0:
                             trajectory_data["images"][cam_name] = images
                             print(f"  Loaded {cam_name}: shape {images.shape}")
+                    
+                    # Try stereo version
+                    stereo_filename = os.path.basename(metadata[mp4_key]).replace(".mp4", "-stereo.mp4")
+                    stereo_path = os.path.join(droid_path, "recordings", "MP4", stereo_filename)
+                    if os.path.exists(stereo_path):
+                        images = self.load_mp4_frames(stereo_path)
+                        if len(images) > 0:
+                            # For stereo, use right camera name
+                            right_cam_name = cam_name.replace("left", "right")
+                            trajectory_data["images"][right_cam_name] = images
+                            print(f"  Loaded {right_cam_name}: shape {images.shape}")
 
         return trajectory_data
 

@@ -83,7 +83,7 @@ class DROIDSuccessDetector:
                 
                 # Extract key information
                 camera_keys = [k for k in data.keys() if "observation/images/" in k]
-                primary_camera = camera_keys[0] if camera_keys else None
+                primary_camera = camera_keys[1] if camera_keys else None
                 
                 # Create dataset item with Ray-compatible data types
                 item = {
