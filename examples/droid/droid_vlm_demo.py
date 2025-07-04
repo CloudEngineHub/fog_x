@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Any
 
 import numpy as np
+import cv2
 import ray
 from download_droid import DROIDDownloader
 from droid_to_robodm import DROIDToRoboDMConverter
@@ -39,7 +40,7 @@ class DROIDSuccessDetector:
                 "robo2vlm": {
                     "model": "Qwen/Qwen2.5-VL-7B-Instruct",
                     "temperature": 0.1,
-                    "max_tokens": 100,
+                    "max_tokens": 4096,
                     "context_length": 1024
                 }
             }
@@ -140,9 +141,10 @@ class DROIDSuccessDetector:
             has_success_label = "success" in file_path.lower()
             trajectory["metadata"] = None # TODO: for now, it has serialization error
             
-            # For demonstration, we'll also use VLM to analyze the last frame
-            # In a real scenario, you might want more sophisticated logic
+            # For demonstration, we'll use VLM to analyze four frames stitched together
+            # This gives better context of the trajectory progression
             try:
+                print(trajectory.keys())
                 # Find camera keys
                 camera_keys = [k for k in trajectory.keys() 
                              if "observation/images/" in k or "image" in k.lower()]
@@ -151,33 +153,62 @@ class DROIDSuccessDetector:
                     # Get the primary camera (usually the second one in DROID)
                     primary_camera = camera_keys[1] if len(camera_keys) > 1 else camera_keys[0]
                     
-                    # Get the last frame
+                    # Get four frames evenly spaced throughout the trajectory
                     frames = trajectory.get(primary_camera, [])
-                    if len(frames) > 0:
-                        last_frame = frames[-1]
+                    if len(frames) >= 4:
+                        # Select 4 frames: start, 1/3, 2/3, and end
+                        indices = [0, len(frames)//3, 2*len(frames)//3, len(frames)-1]
+                        selected_frames = [frames[i] for i in indices]
                         
-                        # IMPORTANT: Create VLM tool locally inside the function
-                        # This avoids capturing it in the closure which would cause serialization issues
-                        from robodm.agent.vlm_service import get_vlm_service
-                        vlm_service = get_vlm_service()
-                        vlm_service.initialize()
+                        # Use OpenCV to stitch frames together in a 2x2 grid
+                        import cv2
                         
-                        # Use VLM to check for success indicators
-                        vlm_response = vlm_service.analyze_image(
-                            last_frame, 
-                            "Is this robot task completed successfully? Answer yes or no."
-                        )
+                        # Ensure all frames are the same size
+                        h, w = selected_frames[0].shape[:2]
+                        resized_frames = []
+                        for frame in selected_frames:
+                            if frame.shape[:2] != (h, w):
+                                frame = cv2.resize(frame, (w, h))
+                            resized_frames.append(frame)
                         
-                        # Check if VLM thinks it's successful
-                        vlm_success = "yes" in vlm_response.lower()
+                        # Create 2x2 grid
+                        top_row = np.hstack([resized_frames[0], resized_frames[1]])
+                        bottom_row = np.hstack([resized_frames[2], resized_frames[3]])
+                        stitched_frame = np.vstack([top_row, bottom_row])
                         
-                        # Combine label and VLM analysis
-                        # For demo, we'll trust the label but log VLM disagreements
-                        if has_success_label != vlm_success:
-                            print(f"Label and VLM disagree for {Path(file_path).name}: "
-                                  f"label={has_success_label}, vlm={vlm_success}")
-                        
-                        return has_success_label
+                    elif len(frames) > 0:
+                        # If fewer than 4 frames, just use the last frame
+                        stitched_frame = frames[-1]
+
+                    # IMPORTANT: Create VLM service locally to avoid serialization issues
+                    # Don't capture external tools in the closure as they contain non-serializable objects
+                    from robodm.agent.vlm_service import get_vlm_service
+                    vlm_service = get_vlm_service()
+                    vlm_service.initialize()
+                    
+                    # Use VLM to check for success indicators on the stitched frames
+                    vlm_response = vlm_service.analyze_image(
+                        stitched_frame, 
+                        "These are 4 frames from the trajectory (start, 1/3, 2/3, end). Describe the robot's intended task first. Then anwser the question: Does this trajectory look successful in completing the task? Answer yes or no."
+                    )
+                    print(vlm_response)
+                    
+                    # Check if VLM thinks it's successful
+                    vlm_success = "yes" in vlm_response.lower()
+                    
+                    # Import Path for local use
+                    from pathlib import Path
+                    
+                    # Combine label and VLM analysis
+                    # For demo, we'll trust the label but log VLM disagreements
+                    if has_success_label != vlm_success:
+                        print(f"❌ Label and VLM disagree for {Path(file_path).name}: "
+                                f"label={has_success_label}, vlm={vlm_success}")
+                    else:
+                        print(f"✅ Label and VLM agree for {Path(file_path).name}: "
+                                f"label={has_success_label}, vlm={vlm_success}")
+                    
+                    return has_success_label
                 
             except Exception as e:
                 print(f"Error in VLM analysis: {e}")
@@ -348,14 +379,6 @@ def main():
     # Cleanup Ray
     if ray.is_initialized():
         ray.shutdown()
-
-    print("\nDemo completed successfully!")
-    print("Key improvements demonstrated:")
-    print("- VLADataset created from file paths (not pre-loaded data)")
-    print("- Parallel loading with load_trajectories()")
-    print("- Filter execution with Executor")
-    print("- VLM tool usage during filtering")
-    print("- Proper dataset materialization")
 
 
 if __name__ == "__main__":
