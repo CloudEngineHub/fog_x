@@ -153,7 +153,7 @@ class DROIDSuccessDetector:
                 
                 if camera_keys:
                     # Get the primary camera (usually the second one in DROID)
-                    primary_camera = camera_keys[1] if len(camera_keys) > 1 else camera_keys[0]
+                    primary_camera = camera_keys[3] if len(camera_keys) > 1 else camera_keys[0]
                     
                     # Get four frames evenly spaced throughout the trajectory
                     frames = trajectory.get(primary_camera, [])
@@ -188,18 +188,42 @@ class DROIDSuccessDetector:
                     vlm_service = get_vlm_service()
                     vlm_service.initialize()
                     
+                    # Import Path for local use
+                    from pathlib import Path
+                    import cv2
+                    
+                    # Create output directory for VLM inputs/outputs
+                    vlm_output_dir = Path("./vlm_analysis_results")
+                    vlm_output_dir.mkdir(exist_ok=True)
+                    
+                    # Create unique filename based on trajectory name
+                    traj_name = Path(file_path).stem
+                    image_filename = vlm_output_dir / f"{traj_name}_input.jpg"
+                    text_filename = vlm_output_dir / f"{traj_name}_output.txt"
+                    
+                    # Save the stitched frame (VLM input)
+                    cv2.imwrite(str(image_filename), cv2.cvtColor(stitched_frame, cv2.COLOR_RGB2BGR))
+                    
                     # Use VLM to check for success indicators on the stitched frames
-                    vlm_response = vlm_service.analyze_image(
-                        stitched_frame, 
-                        "These are 4 frames from the trajectory (start, 1/3, 2/3, end). Describe the robot's intended task first. Then anwser the question: Does this trajectory look successful in completing the task? Answer yes or no."
-                    )
+                    vlm_prompt = "These are 4 frames from the trajectory (start, 1/3, 2/3, end). Describe the robot's intended task first. Then anwser the question: Does this trajectory look successful in completing the task? Answer yes or no."
+                    vlm_response = vlm_service.analyze_image(stitched_frame, vlm_prompt)
+                    
+                    # Save the VLM response (VLM output) with additional metadata
+                    with open(text_filename, 'w') as f:
+                        f.write(f"Trajectory: {traj_name}\n")
+                        f.write(f"File path: {file_path}\n")
+                        f.write(f"Has success label: {has_success_label}\n")
+                        f.write(f"Input image saved as: {image_filename.name}\n")
+                        f.write(f"\nVLM Prompt:\n{vlm_prompt}\n")
+                        f.write(f"\nVLM Response:\n{vlm_response}\n")
+                    
+                    print(f"💾 Saved VLM analysis for {traj_name}:")
+                    print(f"   Input image: {image_filename}")
+                    print(f"   Output text: {text_filename}")
                     print(vlm_response)
                     
                     # Check if VLM thinks it's successful
                     vlm_success = "yes" in vlm_response.lower()
-                    
-                    # Import Path for local use
-                    from pathlib import Path
                     
                     # Combine label and VLM analysis
                     # For demo, we'll trust the label but log VLM disagreements
