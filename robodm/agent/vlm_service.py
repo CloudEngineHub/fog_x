@@ -50,7 +50,7 @@ class VLMService:
             self._initialized = True
     
     def initialize(self, 
-                   model: str = "Qwen/Qwen2.5-VL-7B-Instruct",
+                   model: str = "Qwen/Qwen2.5-VL-32B-Instruct",
                    temperature: float = 0.1,
                    max_tokens: int = 256,
                    base_url: str = "http://localhost:30000/v1",
@@ -69,7 +69,6 @@ class VLMService:
         
         if OPENAI_AVAILABLE:
             try:
-                print(f"Initializing OpenAI client for SGLang server: {model}")
                 self._client = OpenAI(
                     base_url=base_url,
                     api_key=api_key,
@@ -78,7 +77,6 @@ class VLMService:
                 # Test connection with a simple request
                 try:
                     self._client.models.list()
-                    print(f"Successfully connected to SGLang server at {base_url}")
                 except Exception as e:
                     print(f"Failed to connect to SGLang server ({e}), falling back to mock VLM")
                     self._client = None

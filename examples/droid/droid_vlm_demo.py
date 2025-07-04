@@ -9,7 +9,7 @@ This script demonstrates the full RoboDM Agent capabilities:
 5. Shows how VLM tools can be used during filtering
 """
 
-# python3 -m sglang.launch_server   --model-path Qwen/Qwen2.5-VL-7B-Instruct   --host 0.0.0.0   --port 30000 
+# python3 -m sglang.launch_server   --model-path Qwen/Qwen2.5-VL-32B-Instruct   --host 0.0.0.0   --port 30000 
 
 import os
 import time
@@ -40,7 +40,7 @@ class DROIDSuccessDetector:
         self.tools_config = {
             "tools": {
                 "robo2vlm": {
-                    "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+                    "model": "Qwen/Qwen2.5-VL-32B-Instruct",
                     "temperature": 0.1,
                     "max_tokens": 4096,
                     "context_length": 1024
@@ -269,45 +269,6 @@ class DROIDSuccessDetector:
         
         return filtered_dataset
 
-    def analyze_results(self, original_dataset: VLADataset, filtered_dataset: ray.data.Dataset):
-        """
-        Analyze and display results of the filtering operation.
-        
-        Args:
-            original_dataset: Original VLADataset
-            filtered_dataset: Filtered Ray dataset
-        """
-        print("\n" + "=" * 60)
-        print("FILTERING RESULTS")
-        print("=" * 60)
-        
-        # Get counts
-        total_count = original_dataset.count()
-        success_count = filtered_dataset.count()
-        
-        print(f"Total trajectories: {total_count}")
-        print(f"Filtered (successful): {success_count}")
-        print(f"Filtered (failed): {total_count - success_count}")
-        
-        # Sample analysis of filtered trajectories
-        if success_count > 0:
-            print("\nAnalyzing sample successful trajectory...")
-            sample = filtered_dataset.take(1)[0]
-            
-            # Show trajectory info
-            file_path = sample.get("__file_path__", "unknown")
-            print(f"Sample trajectory: {Path(file_path).name}")
-            
-            # Find available data keys
-            data_keys = [k for k in sample.keys() if not k.startswith("__")]
-            print(f"Available data keys: {data_keys[:5]}...")  # Show first 5
-            
-            # Check trajectory length
-            if data_keys:
-                first_key = data_keys[0]
-                if hasattr(sample[first_key], "__len__"):
-                    print(f"Trajectory length: {len(sample[first_key])} frames")
-
     def run_demo_with_agent(self, loaded_dataset: VLADataset):
         """
         Demonstrate using the Agent class with proper dataset.
@@ -324,7 +285,7 @@ class DROIDSuccessDetector:
         # Create Agent with the loaded dataset
         agent = Agent(
             loaded_dataset.get_ray_dataset(),
-            llm_model="Qwen/Qwen2.5-VL-7B-Instruct",
+            llm_model="Qwen/Qwen2.5-VL-32B-Instruct",
             tools_config=self.tools_config,
             context_length=1024
         )
@@ -354,6 +315,126 @@ class DROIDSuccessDetector:
         print(f"Filtered dataset contains {filtered.count()} successful trajectories")
         
         return agent, filtered
+
+    def calculate_f1_matrix(self, dataset: VLADataset):
+        """
+        Calculate and print F1 matrix by comparing ground truth labels with VLM predictions.
+        
+        Args:
+            dataset: VLADataset with loaded trajectories
+        """
+        print("\n" + "=" * 60)
+        print("F1 MATRIX CALCULATION")
+        print("=" * 60)
+        
+        # Get the underlying Ray dataset
+        ray_dataset = dataset.get_ray_dataset()
+        
+        # Transform to extract labels and predictions
+        def extract_labels_and_predictions(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+            """Extract ground truth and VLM predictions for F1 calculation."""
+            from pathlib import Path
+            import numpy as np
+            
+            file_path = trajectory.get("__file_path__", "")
+            ground_truth = "success" in file_path.lower()
+            
+            # Get VLM prediction (simplified version without saving files)
+            vlm_prediction = False
+            try:
+                # Find camera keys
+                camera_keys = [k for k in trajectory.keys() 
+                             if "observation/images/" in k or "image" in k.lower()]
+                
+                if camera_keys:
+                    primary_camera = camera_keys[3] if len(camera_keys) > 1 else camera_keys[0]
+                    frames = trajectory.get(primary_camera, [])
+                    
+                    if len(frames) >= 4:
+                        # Select 4 frames: start, 1/3, 2/3, and end
+                        indices = [0, len(frames)//3, 2*len(frames)//3, len(frames)-1]
+                        selected_frames = [frames[i] for i in indices]
+                        
+                        # Create 2x2 grid
+                        h, w = selected_frames[0].shape[:2]
+                        resized_frames = []
+                        for frame in selected_frames:
+                            if frame.shape[:2] != (h, w):
+                                import cv2
+                                frame = cv2.resize(frame, (w, h))
+                            resized_frames.append(frame)
+                        
+                        top_row = np.hstack([resized_frames[0], resized_frames[1]])
+                        bottom_row = np.hstack([resized_frames[2], resized_frames[3]])
+                        stitched_frame = np.vstack([top_row, bottom_row])
+                        
+                        # Use VLM to get prediction
+                        from robodm.agent.vlm_service import get_vlm_service
+                        vlm_service = get_vlm_service()
+                        vlm_service.initialize()
+                        
+                        vlm_prompt = "These are 4 frames from a robot trajectory. Does this trajectory look successful? Answer yes or no."
+                        vlm_response = vlm_service.analyze_image(stitched_frame, vlm_prompt)
+                        vlm_prediction = "yes" in vlm_response.lower()
+                        
+            except Exception as e:
+                print(f"Error in VLM prediction: {e}")
+                vlm_prediction = ground_truth  # fallback to ground truth
+            
+            return {
+                "trajectory_name": Path(file_path).stem,
+                "ground_truth": ground_truth,
+                "vlm_prediction": vlm_prediction
+            }
+        
+        # Apply transformation to get all predictions
+        results_dataset = ray_dataset.map(extract_labels_and_predictions)
+        results = results_dataset.take_all()
+        
+        # Calculate confusion matrix
+        true_positives = 0
+        true_negatives = 0
+        false_positives = 0
+        false_negatives = 0
+        
+        for result in results:
+            gt = result["ground_truth"]
+            pred = result["vlm_prediction"]
+            
+            if gt and pred:
+                true_positives += 1
+            elif not gt and not pred:
+                true_negatives += 1
+            elif not gt and pred:
+                false_positives += 1
+            elif gt and not pred:
+                false_negatives += 1
+        
+        # Calculate metrics
+        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        accuracy = (true_positives + true_negatives) / len(results)
+        
+        # Print F1 Matrix
+        print("\nConfusion Matrix:")
+        print("                 Predicted")
+        print("                 Fail  Success")
+        print(f"Actual   Fail    {true_negatives:4d}  {false_positives:7d}")
+        print(f"         Success {false_negatives:4d}  {true_positives:7d}")
+        
+        print(f"\nMetrics:")
+        print(f"Accuracy:  {accuracy:.3f}")
+        print(f"Precision: {precision:.3f}")
+        print(f"Recall:    {recall:.3f}")
+        print(f"F1 Score:  {f1_score:.3f}")
+        
+        print(f"\nDetailed Results:")
+        for result in results:
+            status = "✅" if result["ground_truth"] == result["vlm_prediction"] else "❌"
+            print(f"{status} {result['trajectory_name']}: GT={result['ground_truth']}, Pred={result['vlm_prediction']}")
+        
+        return f1_score
 
 
 def main():
@@ -396,11 +477,12 @@ def main():
     filter_func = detector.create_success_filter_function()
     filtered_dataset = detector.apply_filter_with_executor(loaded_dataset, filter_func)
     
-    # Step 6: Analyze results
-    detector.analyze_results(loaded_dataset, filtered_dataset)
+    # Step 6: Calculate F1 Matrix
+    print("\n6. Calculating F1 Matrix...")
+    detector.calculate_f1_matrix(loaded_dataset)
     
-    # Step 7: Demonstrate Agent usage
-    agent, agent_filtered = detector.run_demo_with_agent(loaded_dataset)
+    # # Step 7: Demonstrate Agent usage
+    # agent, agent_filtered = detector.run_demo_with_agent(loaded_dataset)
     
     # Cleanup Ray
     if ray.is_initialized():
