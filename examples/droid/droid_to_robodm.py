@@ -1,21 +1,78 @@
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import h5py
 import numpy as np
+import ray
 
 import robodm
 from robodm import Trajectory
 
 
-class DROIDToRoboDMConverter:
-    """Converts DROID trajectories to RoboDM format."""
+@ray.remote
+def download_and_convert_trajectory(trajectory_path: str, output_dir: str, temp_dir: str) -> Tuple[bool, str, str]:
+    """
+    Download and convert a single DROID trajectory to RoboDM format.
+    
+    Args:
+        trajectory_path: GCS path to DROID trajectory
+        output_dir: Directory to save RoboDM trajectories
+        temp_dir: Temporary directory for downloads
+        
+    Returns:
+        Tuple of (success: bool, output_path: str, error_msg: str)
+    """
+    converter = DROIDProcessor()
+    
+    try:
+        # Download trajectory
+        traj_name = trajectory_path.rstrip("/").split("/")[-1]
+        local_path = os.path.join(temp_dir, traj_name)
+        
+        # Download using gsutil
+        parent_dir = os.path.dirname(local_path)
+        os.makedirs(parent_dir, exist_ok=True)
+        
+        subprocess.run(
+            ["gsutil", "-m", "cp", "-r", trajectory_path, parent_dir],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        
+        # Load DROID data
+        droid_data = converter.load_droid_trajectory(local_path)
+        
+        # Generate output filename
+        success_or_failure = "success" if "success" in trajectory_path else "failure"
+        output_path = os.path.join(output_dir, f"{success_or_failure}_{traj_name}.vla")
+        
+        # Convert to RoboDM
+        converter.convert_to_robodm(droid_data, output_path)
+        
+        # Clean up downloaded files
+        import shutil
+        if os.path.exists(local_path):
+            shutil.rmtree(local_path)
+        
+        return True, output_path, ""
+        
+    except Exception as e:
+        import traceback
+        error_msg = f"Error processing {trajectory_path}: {e}\n{traceback.format_exc()}"
+        return False, "", error_msg
 
-    def __init__(self):
+
+class DROIDProcessor:
+    """Downloads and converts DROID trajectories to RoboDM format."""
+
+    def __init__(self, base_path: str = "gs://gresearch/robotics/droid_raw/1.0.1/"):
+        self.base_path = base_path
         self.camera_names = [
             "hand_camera_left_image",
             "hand_camera_right_image",
@@ -219,14 +276,146 @@ class DROIDToRoboDMConverter:
         traj.close()
         return traj
 
-    def convert_directory(self, input_dir: str, output_dir: str):
+    def discover_trajectories(self, trajectory_type: str = "success", limit: int = None) -> List[str]:
         """
-        Convert all DROID trajectories in a directory to RoboDM format.
+        Discover available trajectories from GCS using gsutil.
+        
+        Args:
+            trajectory_type: Either "success" or "failure"
+            limit: Maximum number of trajectories to return (None for all)
+            
+        Returns:
+            List of trajectory paths
+        """
+        base_path = f"{self.base_path}AUTOLab/{trajectory_type}/"
+        
+        try:
+            # Get date directories
+            result = subprocess.run(
+                ["gsutil", "ls", base_path],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            date_dirs = [line.strip() for line in result.stdout.strip().split('\n') 
+                        if line.strip().endswith('/') and line.strip() != base_path]
+            
+            # Get individual trajectories from each date directory
+            trajectories = []
+            for date_dir in date_dirs:
+                try:
+                    date_result = subprocess.run(
+                        ["gsutil", "ls", date_dir],
+                        capture_output=True,
+                        text=True,
+                        check=True
+                    )
+                    
+                    date_trajectories = [line.strip() for line in date_result.stdout.strip().split('\n') 
+                                       if line.strip().endswith('/')]
+                    
+                    trajectories.extend(date_trajectories)
+                    
+                    if limit and len(trajectories) >= limit:
+                        break
+                        
+                except subprocess.CalledProcessError:
+                    continue
+                    
+            return trajectories[:limit] if limit else trajectories
+            
+        except subprocess.CalledProcessError as e:
+            print(f"Error discovering {trajectory_type} trajectories: {e}")
+            return []
+
+    def download_sample_trajectories(self,
+                                     output_dir: str,
+                                     num_success: int = 2,
+                                     num_failure: int = 2):
+        """
+        Download and convert sample successful and failed trajectories in parallel.
+
+        Args:
+            output_dir: Directory to save RoboDM trajectories
+            num_success: Number of successful trajectories to process
+            num_failure: Number of failed trajectories to process
+        """
+        # Initialize Ray if not already initialized
+        if not ray.is_initialized():
+            ray.init()
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Create temporary directory for downloads
+        temp_dir = tempfile.mkdtemp(prefix="droid_download_")
+        
+        try:
+            # Discover available trajectories
+            print("Discovering available trajectories...")
+            success_trajectories = self.discover_trajectories("success", limit=max(num_success, 10))
+            failure_trajectories = self.discover_trajectories("failure", limit=max(num_failure, 10))
+            
+            print(f"Found {len(success_trajectories)} success trajectories")
+            print(f"Found {len(failure_trajectories)} failure trajectories")
+
+            # Combine trajectories to process
+            trajectories_to_process = (
+                success_trajectories[:num_success] + 
+                failure_trajectories[:num_failure]
+            )
+
+            print(f"Processing {len(trajectories_to_process)} trajectories in parallel...")
+            
+            # Submit all download and conversion tasks to Ray
+            futures = []
+            for traj_path in trajectories_to_process:
+                future = download_and_convert_trajectory.remote(traj_path, output_dir, temp_dir)
+                futures.append(future)
+
+            # Process results as they complete
+            completed = 0
+            failed = 0
+            successful_paths = []
+            
+            while futures:
+                # Wait for at least one task to complete
+                ready, futures = ray.wait(futures, num_returns=1)
+                
+                for future in ready:
+                    success, output_path, error_msg = ray.get(future)
+                    completed += 1
+                    
+                    if success:
+                        successful_paths.append(output_path)
+                        print(f"  [{completed}/{len(trajectories_to_process)}] Successfully processed to {output_path}")
+                    else:
+                        failed += 1
+                        print(f"  [{completed}/{len(trajectories_to_process)}] Failed processing: {error_msg}")
+            
+            print(f"\nProcessing complete: {completed - failed} successful, {failed} failed")
+            return successful_paths
+            
+        finally:
+            # Clean up temporary directory
+            import shutil
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+    
+    def convert_directory(self, input_dir: str, output_dir: str, max_workers: Optional[int] = None):
+        """
+        Convert all DROID trajectories in a directory to RoboDM format using Ray parallelization.
+        This method is kept for backward compatibility when trajectories are already downloaded.
 
         Args:
             input_dir: Directory containing downloaded DROID trajectories
             output_dir: Directory to save RoboDM trajectories
+            max_workers: Maximum number of parallel workers (None for automatic)
         """
+        # Initialize Ray if not already initialized
+        if not ray.is_initialized():
+            ray.init()
+        
         os.makedirs(output_dir, exist_ok=True)
 
         # Find all trajectory directories
@@ -237,44 +426,95 @@ class DROIDToRoboDMConverter:
 
         print(f"Found {len(traj_dirs)} trajectories to convert")
 
-        # Convert each trajectory
-        for i, traj_dir in enumerate(traj_dirs):
-            print(
-                f"\nConverting trajectory {i+1}/{len(traj_dirs)}: {traj_dir}")
+        # Submit all conversion tasks to Ray
+        print("Submitting conversion tasks to Ray...")
+        futures = []
+        for traj_dir in traj_dirs:
+            future = convert_single_trajectory.remote(traj_dir, output_dir)
+            futures.append(future)
 
-            try:
-                # Load DROID data
-                droid_data = self.load_droid_trajectory(traj_dir)
+        # Process results as they complete
+        print("Processing trajectories in parallel...")
+        completed = 0
+        failed = 0
+        
+        while futures:
+            # Wait for at least one task to complete
+            ready, futures = ray.wait(futures, num_returns=1)
+            
+            for future in ready:
+                success, output_path, error_msg = ray.get(future)
+                completed += 1
+                
+                if success:
+                    print(f"  [{completed}/{len(traj_dirs)}] Successfully converted to {output_path}")
+                else:
+                    failed += 1
+                    print(f"  [{completed}/{len(traj_dirs)}] Failed conversion: {error_msg}")
+        
+        print(f"\nConversion complete: {completed - failed} successful, {failed} failed")
+    
+    def shutdown_ray(self):
+        """Shutdown Ray cluster."""
+        if ray.is_initialized():
+            ray.shutdown()
 
-                # Generate output filename
-                traj_name = os.path.basename(traj_dir)
-                success_or_failure = "success" if "success" in traj_dir else "failure"
-                output_path = os.path.join(
-                    output_dir, f"{success_or_failure}_{traj_name}.vla")
 
-                # Convert to RoboDM
-                self.convert_to_robodm(droid_data, output_path)
-                print(f"  Successfully converted to {output_path}")
-
-            except Exception as e:
-                print(f"  Error converting {traj_dir}: {e}")
-                import traceback
-
-                traceback.print_exc()
-                continue
+@ray.remote
+def convert_single_trajectory(traj_dir: str, output_dir: str) -> Tuple[bool, str, str]:
+    """
+    Convert a single DROID trajectory to RoboDM format.
+    This function is kept for backward compatibility when trajectories are already downloaded.
+    
+    Args:
+        traj_dir: Path to DROID trajectory directory
+        output_dir: Directory to save RoboDM trajectories
+        
+    Returns:
+        Tuple of (success: bool, output_path: str, error_msg: str)
+    """
+    converter = DROIDProcessor()
+    
+    try:
+        # Load DROID data
+        droid_data = converter.load_droid_trajectory(traj_dir)
+        
+        # Generate output filename
+        traj_name = os.path.basename(traj_dir)
+        success_or_failure = "success" if "success" in traj_dir else "failure"
+        output_path = os.path.join(output_dir, f"{success_or_failure}_{traj_name}.vla")
+        
+        # Convert to RoboDM
+        converter.convert_to_robodm(droid_data, output_path)
+        
+        return True, output_path, ""
+        
+    except Exception as e:
+        import traceback
+        error_msg = f"Error converting {traj_dir}: {e}\n{traceback.format_exc()}"
+        return False, "", error_msg
 
 
 if __name__ == "__main__":
     # Example usage
-    converter = DROIDToRoboDMConverter()
-
-    # Convert downloaded DROID trajectories
-    input_dir = "./droid_data"
+    processor = DROIDProcessor()
     output_dir = "./robodm_trajectories"
 
-    if os.path.exists(input_dir):
-        converter.convert_directory(input_dir, output_dir)
-    else:
-        print(
-            f"Input directory {input_dir} not found. Please run download_droid.py first."
+    try:
+        # New parallel download and conversion approach
+        print("Starting parallel download and conversion...")
+        successful_paths = processor.download_sample_trajectories(
+            output_dir=output_dir, 
+            num_success=20, 
+            num_failure=20
         )
+        
+        print(f"\nSuccessfully processed {len(successful_paths)} trajectories:")
+        for path in successful_paths:
+            print(f"  - {path}")
+            
+    except Exception as e:
+        print(f"Error during processing: {e}")
+    finally:
+        # Ensure Ray is properly shut down
+        processor.shutdown_ray()

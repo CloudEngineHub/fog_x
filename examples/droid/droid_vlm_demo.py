@@ -181,7 +181,7 @@ class DROIDSuccessDetector:
                     cv2.imwrite(str(image_filename), cv2.cvtColor(stitched_frame, cv2.COLOR_RGB2BGR))
                     
                     # Use VLM to check for success indicators on the stitched frames
-                    vlm_prompt = "These are 4 frames from the trajectory (start, 1/3, 2/3, end). Describe the robot's intended task first. Then anwser the question: Does this trajectory look successful in completing the task? Answer yes or no."
+                    vlm_prompt = "These are 4 frames from the trajectory (start, 1/3, 2/3, end). Anwser the question: Does this trajectory look successful in completing the task? Answer yes or no."
                     vlm_response = vlm_service.analyze_image(stitched_frame, vlm_prompt)
                     
                     # Save the VLM response (VLM output) with additional metadata
@@ -231,19 +231,12 @@ class DROIDSuccessDetector:
         Returns:
             Filtered VLADataset
         """
-        print("Applying filter with Executor...")
-        print(f"Dataset type: {type(dataset)}")
-        print(f"Dataset has filter: {hasattr(dataset, 'filter')}")
-        print(f"Dataset has _is_loaded: {hasattr(dataset, '_is_loaded')}")
-        print(f"Dataset is loaded: {getattr(dataset, '_is_loaded', 'N/A')}")
-        
+
         # Pass VLADataset directly to executor
         # The executor will use VLADataset's filter method which handles lazy loading
         start_time = time.time()
         filtered_dataset = self.executor.apply_filter(dataset, filter_func)
         filter_time = time.time() - start_time
-        
-        print(f"Filter execution time: {filter_time:.2f} seconds")
         
         return filtered_dataset
 
