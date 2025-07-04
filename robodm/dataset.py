@@ -84,6 +84,10 @@ class VLADataset:
         self._schema = None
         self._stats: Optional[Dict[str, Any]] = None
         
+        # Track dataset state - starts with just file paths
+        self._is_loaded = False
+        self._has_file_paths = True
+        
         logger.info(f"Initialized VLADataset with {len(self.file_paths)} files")
 
     def _get_files(self, path: str) -> List[str]:
@@ -144,7 +148,14 @@ class VLADataset:
         return manager
 
     def get_ray_dataset(self) -> rd.Dataset:
-        """Get the underlying Ray dataset."""
+        """Get the underlying Ray dataset.
+        
+        Note: If dataset is not loaded, this returns a dataset of file paths.
+        Consider using filter() or map() methods which handle loading automatically.
+        """
+        if not self._is_loaded and self._has_file_paths:
+            logger.warning("Accessing Ray dataset with file paths only. "
+                         "Consider using VLADataset methods for automatic loading.")
         return self.ray_dataset
 
     def iter_batches(self, batch_size: Optional[int] = None):
@@ -227,31 +238,95 @@ class VLADataset:
             split_dataset.metadata_manager = self.metadata_manager
             split_dataset._schema = self._schema
             split_dataset._stats = None
+            split_dataset._is_loaded = self._is_loaded
+            split_dataset._has_file_paths = self._has_file_paths
             split_datasets.append(split_dataset)
 
         return split_datasets
 
+    def _ensure_loaded(self):
+        """Ensure trajectories are loaded, applying lazy loading if needed."""
+        if not self._is_loaded and self._has_file_paths:
+            # Apply lazy loading transformation
+            self.ray_dataset = self.ray_dataset.map(
+                self._load_trajectory,
+                num_cpus=self.config.num_parallel_reads,
+                concurrency=self.config.num_parallel_reads,
+            )
+            self._is_loaded = True
+            logger.info("Applied lazy trajectory loading transformation")
+    
     def filter(self, fn):
-        """Filter the dataset."""
+        """Filter the dataset with automatic lazy loading."""
         filtered_dataset = VLADataset.__new__(VLADataset)
         filtered_dataset.path = self.path
         filtered_dataset.return_type = self.return_type
         filtered_dataset.config = self.config
         filtered_dataset.file_paths = self.file_paths
-        filtered_dataset.ray_dataset = self.ray_dataset.filter(fn)
+        
+        # Handle lazy loading - don't load if not needed
+        if not self._is_loaded and self._has_file_paths:
+            # Create a combined load-and-filter operation for efficiency
+            def load_and_filter(item):
+                trajectory = self._load_trajectory(item)
+                # Add filter result as a field in the trajectory
+                keep = fn(trajectory)
+                trajectory['__filter_result__'] = keep
+                return trajectory
+            
+            # Apply combined operation
+            temp_dataset = self.ray_dataset.map(
+                load_and_filter,
+                num_cpus=self.config.num_parallel_reads,
+                concurrency=self.config.num_parallel_reads,
+            )
+            
+            # Filter based on the result and remove the temporary field
+            filtered_dataset.ray_dataset = temp_dataset.filter(
+                lambda item: item['__filter_result__']
+            ).map(lambda item: {k: v for k, v in item.items() if k != '__filter_result__'})
+            
+            filtered_dataset._is_loaded = True
+        else:
+            # Already loaded, just filter normally
+            filtered_dataset.ray_dataset = self.ray_dataset.filter(fn)
+            filtered_dataset._is_loaded = self._is_loaded
+        
+        filtered_dataset._has_file_paths = self._has_file_paths
         filtered_dataset.metadata_manager = self.metadata_manager
         filtered_dataset._schema = self._schema
         filtered_dataset._stats = None
         return filtered_dataset
 
     def map(self, fn, **kwargs):
-        """Map a function over the dataset."""
+        """Map a function over the dataset with automatic lazy loading."""
         mapped_dataset = VLADataset.__new__(VLADataset)
         mapped_dataset.path = self.path
         mapped_dataset.return_type = self.return_type
         mapped_dataset.config = self.config
         mapped_dataset.file_paths = self.file_paths
-        mapped_dataset.ray_dataset = self.ray_dataset.map(fn, **kwargs)
+        
+        # Handle lazy loading
+        if not self._is_loaded and self._has_file_paths:
+            # Combine load and map operations
+            def load_and_map(item):
+                trajectory = self._load_trajectory(item)
+                return fn(trajectory)
+            
+            # Use provided kwargs or default to config settings
+            if 'num_cpus' not in kwargs:
+                kwargs['num_cpus'] = self.config.num_parallel_reads
+            if 'concurrency' not in kwargs:
+                kwargs['concurrency'] = self.config.num_parallel_reads
+                
+            mapped_dataset.ray_dataset = self.ray_dataset.map(load_and_map, **kwargs)
+            mapped_dataset._is_loaded = True
+        else:
+            # Already loaded, just map normally
+            mapped_dataset.ray_dataset = self.ray_dataset.map(fn, **kwargs)
+            mapped_dataset._is_loaded = self._is_loaded
+            
+        mapped_dataset._has_file_paths = self._has_file_paths
         mapped_dataset.metadata_manager = self.metadata_manager
         mapped_dataset._schema = None  # Schema might change after mapping
         mapped_dataset._stats = None
@@ -259,11 +334,31 @@ class VLADataset:
     
     def load_trajectories(self):
         """Load trajectory data from file paths using map function."""
-        return self.map(
+        if self._is_loaded:
+            logger.info("Dataset already loaded, returning self")
+            return self
+            
+        loaded_dataset = VLADataset.__new__(VLADataset)
+        loaded_dataset.path = self.path
+        loaded_dataset.return_type = self.return_type
+        loaded_dataset.config = self.config
+        loaded_dataset.file_paths = self.file_paths
+        
+        # Apply loading transformation
+        loaded_dataset.ray_dataset = self.ray_dataset.map(
             self._load_trajectory,
             num_cpus=self.config.num_parallel_reads,
             concurrency=self.config.num_parallel_reads,
         )
+        
+        # Update state
+        loaded_dataset._is_loaded = True
+        loaded_dataset._has_file_paths = self._has_file_paths
+        loaded_dataset.metadata_manager = self.metadata_manager
+        loaded_dataset._schema = None
+        loaded_dataset._stats = None
+        
+        return loaded_dataset
     
     def _select_frame(self, item, frame_type: str = "last") -> Dict[str, Any]:
         """Select a specific frame from trajectory data at query time."""
@@ -323,6 +418,8 @@ class VLADataset:
         shuffled_dataset.metadata_manager = self.metadata_manager
         shuffled_dataset._schema = self._schema
         shuffled_dataset._stats = None
+        shuffled_dataset._is_loaded = self._is_loaded
+        shuffled_dataset._has_file_paths = self._has_file_paths
         return shuffled_dataset
 
     def materialize(self):

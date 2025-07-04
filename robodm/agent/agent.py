@@ -22,16 +22,16 @@ class Agent:
 
     def __init__(
         self,
-        dataset: Dataset,
+        dataset,
         llm_model: str = "Llama 3.2-Vision2.5-7b",
         tools_config: Optional[Dict[str, Any]] = None,
         **llm_kwargs
     ):
         """
-        Initialize Agent with a RoboDM Ray dataset.
+        Initialize Agent with a RoboDM dataset.
 
         Args:
-            dataset: Ray Dataset containing trajectory data
+            dataset: Ray Dataset or VLADataset containing trajectory data
             llm_model: Model name for LLM-based planning (default: Llama 3.2-Vision2.5-7b)
             tools_config: Configuration for tools system (can be dict or preset name)
             **llm_kwargs: Additional LLM configuration (e.g., context_length, enforce_eager)

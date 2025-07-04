@@ -30,18 +30,25 @@ class Executor:
         self.max_retries = max_retries
         self.tools_manager = tools_manager
 
-    def apply_filter(self, dataset: Dataset,
-                     filter_func: Callable[[Dict[str, Any]], bool]) -> Dataset:
+    def apply_filter(self, dataset,
+                     filter_func: Callable[[Dict[str, Any]], bool]):
         """
-        Apply filter function to Ray dataset.
+        Apply filter function to Ray dataset or VLADataset.
 
         Args:
-            dataset: Input Ray dataset
+            dataset: Input Ray dataset or VLADataset
             filter_func: Filter function that returns True for trajectories to keep
 
         Returns:
-            Filtered Ray dataset
+            Filtered dataset (same type as input)
         """
+        # Check if this is a VLADataset
+        if hasattr(dataset, 'filter') and hasattr(dataset, '_is_loaded'):
+            # Use VLADataset's built-in filter which handles lazy loading
+            logger.info(f"Using VLADataset filter method, is_loaded={dataset._is_loaded}")
+            return dataset.filter(filter_func)
+            
+        # Otherwise treat as Ray dataset
         try:
             # Wrap filter function for Ray dataset
             def ray_filter_wrapper(batch):
@@ -109,18 +116,24 @@ class Executor:
             raise RuntimeError(f"Failed to apply filter: {e}")
 
     def apply_map(
-            self, dataset: Dataset,
-            map_func: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Dataset:
+            self, dataset,
+            map_func: Callable[[Dict[str, Any]], Dict[str, Any]]):
         """
-        Apply map function to Ray dataset.
+        Apply map function to Ray dataset or VLADataset.
 
         Args:
-            dataset: Input Ray dataset
+            dataset: Input Ray dataset or VLADataset
             map_func: Map function that transforms trajectories
 
         Returns:
-            Transformed Ray dataset
+            Transformed dataset (same type as input)
         """
+        # Check if this is a VLADataset
+        if hasattr(dataset, 'map') and hasattr(dataset, '_is_loaded'):
+            # Use VLADataset's built-in map which handles lazy loading
+            return dataset.map(map_func)
+            
+        # Otherwise treat as Ray dataset
         try:
             # Wrap map function for Ray dataset
             def ray_map_wrapper(batch):

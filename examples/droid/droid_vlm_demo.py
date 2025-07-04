@@ -89,35 +89,11 @@ class DROIDSuccessDetector:
         )
         
         print(f"Created VLADataset with {dataset.count()} trajectory files")
+        print(f"Dataset type: {type(dataset)}")
+        print(f"Has _is_loaded: {hasattr(dataset, '_is_loaded')}")
+        print(f"Is loaded: {dataset._is_loaded}")
         
         return dataset
-
-    def load_and_materialize_dataset(self, dataset: VLADataset) -> VLADataset:
-        """
-        Load trajectories in parallel and materialize the dataset.
-        
-        This demonstrates the proper use of load_trajectories() for
-        parallel data loading.
-        
-        Args:
-            dataset: VLADataset with file paths
-            
-        Returns:
-            VLADataset with loaded trajectory data
-        """
-        print("Loading trajectories in parallel...")
-        
-        # Load trajectories - this transforms file paths to actual data
-        # The loading happens in parallel across Ray workers
-        loaded_dataset = dataset.load_trajectories()
-        
-        # Materialize to ensure data is computed and cached
-        print("Materializing dataset...")
-        loaded_dataset.materialize()
-        
-        print(f"Loaded and materialized {loaded_dataset.count()} trajectories")
-        
-        return loaded_dataset
 
     def create_success_filter_function(self) -> callable:
         """
@@ -244,47 +220,49 @@ class DROIDSuccessDetector:
         
         return filter_successful_trajectories
 
-    def apply_filter_with_executor(self, dataset: VLADataset, filter_func: callable) -> ray.data.Dataset:
+    def apply_filter_with_executor(self, dataset: VLADataset, filter_func: callable) -> VLADataset:
         """
         Apply filter using the Executor directly (bypassing planner).
         
         Args:
-            dataset: VLADataset with loaded trajectories
+            dataset: VLADataset (can have just file paths)
             filter_func: Filter function to apply
             
         Returns:
-            Filtered Ray dataset
+            Filtered VLADataset
         """
         print("Applying filter with Executor...")
+        print(f"Dataset type: {type(dataset)}")
+        print(f"Dataset has filter: {hasattr(dataset, 'filter')}")
+        print(f"Dataset has _is_loaded: {hasattr(dataset, '_is_loaded')}")
+        print(f"Dataset is loaded: {getattr(dataset, '_is_loaded', 'N/A')}")
         
-        # Get the underlying Ray dataset
-        ray_dataset = dataset.get_ray_dataset()
-        
-        # Apply filter using executor
+        # Pass VLADataset directly to executor
+        # The executor will use VLADataset's filter method which handles lazy loading
         start_time = time.time()
-        filtered_dataset = self.executor.apply_filter(ray_dataset, filter_func)
+        filtered_dataset = self.executor.apply_filter(dataset, filter_func)
         filter_time = time.time() - start_time
         
         print(f"Filter execution time: {filter_time:.2f} seconds")
         
         return filtered_dataset
 
-    def run_demo_with_agent(self, loaded_dataset: VLADataset):
+    def run_demo_with_agent(self, dataset: VLADataset):
         """
-        Demonstrate using the Agent class with proper dataset.
+        Demonstrate using the Agent class with lazy dataset.
         
         This shows how the system should work with natural language queries.
         
         Args:
-            loaded_dataset: VLADataset with loaded trajectories
+            dataset: VLADataset (can have just file paths)
         """
         print("\n" + "=" * 60)
         print("AGENT-BASED FILTERING DEMO")
         print("=" * 60)
         
-        # Create Agent with the loaded dataset
+        # Create Agent with the dataset directly
         agent = Agent(
-            loaded_dataset.get_ray_dataset(),
+            dataset,  # Pass VLADataset directly
             llm_model="Qwen/Qwen2.5-VL-32B-Instruct",
             tools_config=self.tools_config,
             context_length=1024
@@ -326,9 +304,6 @@ class DROIDSuccessDetector:
         print("\n" + "=" * 60)
         print("F1 MATRIX CALCULATION")
         print("=" * 60)
-        
-        # Get the underlying Ray dataset
-        ray_dataset = dataset.get_ray_dataset()
         
         # Transform to extract labels and predictions
         def extract_labels_and_predictions(trajectory: Dict[str, Any]) -> Dict[str, Any]:
@@ -387,9 +362,10 @@ class DROIDSuccessDetector:
                 "vlm_prediction": vlm_prediction
             }
         
-        # Apply transformation to get all predictions
-        results_dataset = ray_dataset.map(extract_labels_and_predictions)
-        results = results_dataset.take_all()
+        # Apply transformation to get all predictions using VLADataset's map
+        # This will automatically handle lazy loading
+        results_dataset = dataset.map(extract_labels_and_predictions)
+        results = list(results_dataset.take(results_dataset.count()))
         
         # Calculate confusion matrix
         true_positives = 0
@@ -468,21 +444,19 @@ def main():
     detector = DROIDSuccessDetector()
     dataset = detector.create_robodm_dataset(robodm_dir)
     
-    # Step 4: Load trajectories in parallel
-    print("\n4. Loading trajectories in parallel...")
-    loaded_dataset = detector.load_and_materialize_dataset(dataset)
-    
-    # Step 5: Create and apply filter
-    print("\n5. Creating and applying filter...")
+    # Step 4: Create and apply filter (loading happens automatically)
+    print("\n4. Creating and applying filter (with automatic lazy loading)...")
     filter_func = detector.create_success_filter_function()
-    filtered_dataset = detector.apply_filter_with_executor(loaded_dataset, filter_func)
+    filtered_dataset = detector.apply_filter_with_executor(dataset, filter_func)
     
-    # Step 6: Calculate F1 Matrix
-    print("\n6. Calculating F1 Matrix...")
-    detector.calculate_f1_matrix(loaded_dataset)
+    print(f"Filtered dataset contains {filtered_dataset.count()} successful trajectories")
     
-    # # Step 7: Demonstrate Agent usage
-    # agent, agent_filtered = detector.run_demo_with_agent(loaded_dataset)
+    # Step 5: Calculate F1 Matrix
+    print("\n5. Calculating F1 Matrix...")
+    detector.calculate_f1_matrix(dataset)
+    
+    # # Step 6: Demonstrate Agent usage (uncomment to test)
+    # agent, agent_filtered = detector.run_demo_with_agent(dataset)
     
     # Cleanup Ray
     if ray.is_initialized():
