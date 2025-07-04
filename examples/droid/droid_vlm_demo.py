@@ -9,6 +9,8 @@ This script demonstrates the full RoboDM Agent capabilities:
 5. Shows how VLM tools can be used during filtering
 """
 
+# python3 -m sglang.launch_server   --model-path Qwen/Qwen2.5-VL-7B-Instruct   --host 0.0.0.0   --port 30000 
+
 import os
 import time
 from pathlib import Path
