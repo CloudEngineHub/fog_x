@@ -9,7 +9,7 @@ This script demonstrates the full RoboDM Agent capabilities:
 5. Shows how VLM tools can be used during filtering
 """
 
-# python3 -m sglang.launch_server   --model-path Qwen/Qwen2.5-VL-32B-Instruct   --host 0.0.0.0   --port 30000 
+# python3 -m sglang.launch_server   --model-path Qwen/Qwen2.5-VL-7B-Instruct   --host 0.0.0.0   --port 30000 
 
 import os
 import time
@@ -19,8 +19,6 @@ from typing import Dict, List, Any
 import numpy as np
 import cv2
 import ray
-from download_droid import DROIDDownloader
-from droid_to_robodm import DROIDToRoboDMConverter
 
 import robodm
 from robodm.dataset import VLADataset, DatasetConfig
@@ -40,7 +38,7 @@ class DROIDSuccessDetector:
         self.tools_config = {
             "tools": {
                 "robo2vlm": {
-                    "model": "Qwen/Qwen2.5-VL-32B-Instruct",
+                    "model": "Qwen/Qwen2.5-VL-7B-Instruct",
                     "temperature": 0.1,
                     "max_tokens": 4096,
                     "context_length": 1024
@@ -75,7 +73,6 @@ class DROIDSuccessDetector:
         config = DatasetConfig(
             batch_size=4,
             shuffle=False,
-            num_parallel_reads=16,  # Parallel loading
             use_metadata=True,
             auto_build_metadata=False  # We'll manage metadata manually for now
         )
@@ -122,7 +119,6 @@ class DROIDSuccessDetector:
             # For demonstration, we'll use VLM to analyze four frames stitched together
             # This gives better context of the trajectory progression
             try:
-                print(trajectory.keys())
                 # Find camera keys
                 camera_keys = [k for k in trajectory.keys() 
                              if "observation/images/" in k or "image" in k.lower()]
@@ -162,7 +158,7 @@ class DROIDSuccessDetector:
                     # Don't capture external tools in the closure as they contain non-serializable objects
                     from robodm.agent.vlm_service import get_vlm_service
                     vlm_service = get_vlm_service()
-                    vlm_service.initialize()
+                    # vlm_service.initialize()
                     
                     # Import Path for local use
                     from pathlib import Path
@@ -220,73 +216,6 @@ class DROIDSuccessDetector:
         
         return filter_successful_trajectories
 
-    def apply_filter_with_executor(self, dataset: VLADataset, filter_func: callable) -> VLADataset:
-        """
-        Apply filter using the Executor directly (bypassing planner).
-        
-        Args:
-            dataset: VLADataset (can have just file paths)
-            filter_func: Filter function to apply
-            
-        Returns:
-            Filtered VLADataset
-        """
-
-        # Pass VLADataset directly to executor
-        # The executor will use VLADataset's filter method which handles lazy loading
-        start_time = time.time()
-        filtered_dataset = self.executor.apply_filter(dataset, filter_func)
-        filter_time = time.time() - start_time
-        
-        return filtered_dataset
-
-    def run_demo_with_agent(self, dataset: VLADataset):
-        """
-        Demonstrate using the Agent class with lazy dataset.
-        
-        This shows how the system should work with natural language queries.
-        
-        Args:
-            dataset: VLADataset (can have just file paths)
-        """
-        print("\n" + "=" * 60)
-        print("AGENT-BASED FILTERING DEMO")
-        print("=" * 60)
-        
-        # Create Agent with the dataset directly
-        agent = Agent(
-            dataset,  # Pass VLADataset directly
-            llm_model="Qwen/Qwen2.5-VL-32B-Instruct",
-            tools_config=self.tools_config,
-            context_length=1024
-        )
-        
-        print(f"Agent initialized with {agent.count()} trajectories")
-        print(f"Available tools: {agent.list_tools()}")
-        
-        # Show dataset schema
-        print("\nDataset schema:")
-        schema_info = agent.inspect_schema()
-        for key in list(schema_info.get("keys", []))[:5]:
-            print(f"  {key}")
-        
-        # Natural language filtering
-        print('\nApplying filter: "trajectories that are successful"')
-        print("Note: For this demo, we're using a predefined filter function")
-        print("In production, the planner would generate this from the prompt")
-        
-        # For now, we'll use our predefined filter
-        # In the full system, this would use: agent.filter("trajectories that are successful")
-        # which would trigger the planner to generate the filter function
-        
-        # Instead, we'll demonstrate the executor directly
-        filter_func = self.create_success_filter_function()
-        filtered = self.executor.apply_filter(agent.dataset, filter_func)
-        
-        print(f"Filtered dataset contains {filtered.count()} successful trajectories")
-        
-        return agent, filtered
-
     def calculate_f1_matrix(self, dataset: VLADataset):
         """
         Calculate and print F1 matrix by comparing ground truth labels with VLM predictions.
@@ -343,6 +272,7 @@ class DROIDSuccessDetector:
                         
                         vlm_prompt = "These are 4 frames from a robot trajectory. Does this trajectory look successful? Answer yes or no."
                         vlm_response = vlm_service.analyze_image(stitched_frame, vlm_prompt)
+                        print(vlm_response)
                         vlm_prediction = "yes" in vlm_response.lower()
                         
             except Exception as e:
@@ -357,8 +287,8 @@ class DROIDSuccessDetector:
         
         # Apply transformation to get all predictions using VLADataset's map
         # This will automatically handle lazy loading
-        results_dataset = dataset.map(extract_labels_and_predictions)
-        results = list(results_dataset.take(results_dataset.count()))
+        results_dataset = dataset.map(extract_labels_and_predictions).materialize()
+        results = list(results_dataset.iter_rows())
         
         # Calculate confusion matrix
         true_positives = 0
@@ -411,45 +341,15 @@ def main():
     print("RoboDM VLADataset and Agent Demo")
     print("=" * 60)
 
-    # Step 1: Download DROID trajectories
-    print("\n1. Downloading DROID trajectories...")
-    downloader = DROIDDownloader()
-    droid_data_dir = "./droid_data"
-
-    if not os.path.exists(droid_data_dir):
-        success_paths, failure_paths = downloader.download_sample_trajectories(
-            output_dir=droid_data_dir, num_success=5, num_failure=5)  # Smaller for demo
-    else:
-        print(f"Using existing data in {droid_data_dir}")
-
-    # Step 2: Convert to RoboDM format
-    print("\n2. Converting to RoboDM format...")
-    converter = DROIDToRoboDMConverter()
     robodm_dir = "./robodm_trajectories"
-
-    if not os.path.exists(robodm_dir):
-        converter.convert_directory(droid_data_dir, robodm_dir)
-    else:
-        print(f"Using existing RoboDM trajectories in {robodm_dir}")
-
     # Step 3: Create VLADataset (with file paths only)
     print("\n3. Creating VLADataset...")
     detector = DROIDSuccessDetector()
     dataset = detector.create_robodm_dataset(robodm_dir)
     
-    # Step 4: Create and apply filter (loading happens automatically)
-    print("\n4. Creating and applying filter (with automatic lazy loading)...")
-    filter_func = detector.create_success_filter_function()
-    filtered_dataset = detector.apply_filter_with_executor(dataset, filter_func)
-    
-    print(f"Filtered dataset contains {filtered_dataset.count()} successful trajectories")
-    
     # Step 5: Calculate F1 Matrix
     print("\n5. Calculating F1 Matrix...")
     detector.calculate_f1_matrix(dataset)
-    
-    # # Step 6: Demonstrate Agent usage (uncomment to test)
-    # agent, agent_filtered = detector.run_demo_with_agent(dataset)
     
     # Cleanup Ray
     if ray.is_initialized():

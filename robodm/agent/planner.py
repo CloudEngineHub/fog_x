@@ -25,12 +25,12 @@ class Planner:
     Dynamically adapts to dataset schema.
     """
 
-    def __init__(self, llm_model: str = "Qwen/Qwen2.5-VL-32B-Instruct", tools_manager=None, **llm_kwargs):
+    def __init__(self, llm_model: str = "Qwen/Qwen2.5-VL-7B-Instruct", tools_manager=None, **llm_kwargs):
         """
         Initialize Planner with shared VLM service.
 
         Args:
-            llm_model: Model name for code generation (default: Qwen/Qwen2.5-VL-32B-Instruct)
+            llm_model: Model name for code generation (default: Qwen/Qwen2.5-VL-7B-Instruct)
             tools_manager: ToolsManager instance for accessing tools
             **llm_kwargs: Additional arguments for VLM service initialization
         """
