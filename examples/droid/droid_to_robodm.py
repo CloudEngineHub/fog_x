@@ -276,65 +276,88 @@ class DROIDProcessor:
         traj.close()
         return traj
 
-    def discover_trajectories(self, trajectory_type: str = "success", limit: int = None) -> List[str]:
+    def discover_trajectories(self, trajectory_type: str = "success", limit: int = None, labs: List[str] = None) -> List[str]:
         """
-        Discover available trajectories from GCS using gsutil.
+        Discover available trajectories from GCS using gsutil across all labs.
         
         Args:
             trajectory_type: Either "success" or "failure"
             limit: Maximum number of trajectories to return (None for all)
+            labs: List of lab names to search (None for all available labs)
             
         Returns:
             List of trajectory paths
         """
-        base_path = f"{self.base_path}AUTOLab/{trajectory_type}/"
+        # Get all available labs if not specified
+        if labs is None:
+            try:
+                result = subprocess.run(
+                    ["gsutil", "ls", self.base_path],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                labs = [line.strip().rstrip('/').split('/')[-1] for line in result.stdout.strip().split('\n') 
+                       if line.strip().endswith('/') and not line.strip().endswith('1.0.1/')]
+                
+            except subprocess.CalledProcessError as e:
+                print(f"Error discovering labs: {e}")
+                return []
         
-        try:
-            # Get date directories
-            result = subprocess.run(
-                ["gsutil", "ls", base_path],
-                capture_output=True,
-                text=True,
-                check=True
-            )
+        trajectories = []
+        
+        for lab in labs:
+            lab_path = f"{self.base_path}{lab}/{trajectory_type}/"
             
-            date_dirs = [line.strip() for line in result.stdout.strip().split('\n') 
-                        if line.strip().endswith('/') and line.strip() != base_path]
-            
-            # Get individual trajectories from each date directory
-            trajectories = []
-            for date_dir in date_dirs:
-                try:
-                    date_result = subprocess.run(
-                        ["gsutil", "ls", date_dir],
-                        capture_output=True,
-                        text=True,
-                        check=True
-                    )
-                    
-                    date_trajectories = [line.strip() for line in date_result.stdout.strip().split('\n') 
-                                       if line.strip().endswith('/')]
-                    
-                    trajectories.extend(date_trajectories)
-                    
-                    if limit and len(trajectories) >= limit:
-                        break
+            try:
+                # Check if this lab has the trajectory type directory
+                result = subprocess.run(
+                    ["gsutil", "ls", lab_path],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                
+                date_dirs = [line.strip() for line in result.stdout.strip().split('\n') 
+                            if line.strip().endswith('/') and line.strip() != lab_path]
+                
+                # Get individual trajectories from each date directory
+                for date_dir in date_dirs:
+                    try:
+                        date_result = subprocess.run(
+                            ["gsutil", "ls", date_dir],
+                            capture_output=True,
+                            text=True,
+                            check=True
+                        )
                         
-                except subprocess.CalledProcessError:
-                    continue
+                        date_trajectories = [line.strip() for line in date_result.stdout.strip().split('\n') 
+                                           if line.strip().endswith('/')]
+                        
+                        trajectories.extend(date_trajectories)
+                        
+                        if limit and len(trajectories) >= limit:
+                            break
+                            
+                    except subprocess.CalledProcessError:
+                        continue
+                        
+                if limit and len(trajectories) >= limit:
+                    break
                     
-            return trajectories[:limit] if limit else trajectories
-            
-        except subprocess.CalledProcessError as e:
-            print(f"Error discovering {trajectory_type} trajectories: {e}")
-            return []
+            except subprocess.CalledProcessError:
+                # Lab doesn't have this trajectory type, skip
+                continue
+                
+        return trajectories[:limit] if limit else trajectories
 
     def download_sample_trajectories(self,
                                      output_dir: str,
-                                     num_success: int = 2,
-                                     num_failure: int = 2):
+                                     num_success: int = 300,
+                                     num_failure: int = 100):
         """
-        Download and convert sample successful and failed trajectories in parallel.
+        Download and convert successful and failed trajectories in parallel from all labs.
 
         Args:
             output_dir: Directory to save RoboDM trajectories
@@ -351,21 +374,24 @@ class DROIDProcessor:
         temp_dir = tempfile.mkdtemp(prefix="droid_download_")
         
         try:
-            # Discover available trajectories
-            print("Discovering available trajectories...")
-            success_trajectories = self.discover_trajectories("success", limit=max(num_success, 10))
-            failure_trajectories = self.discover_trajectories("failure", limit=max(num_failure, 10))
+            # Discover available trajectories from all labs
+            print("Discovering available trajectories across all labs...")
+            success_trajectories = self.discover_trajectories("success", limit=num_success * 2)  # Get more than needed
+            failure_trajectories = self.discover_trajectories("failure", limit=num_failure * 2)  # Get more than needed
             
             print(f"Found {len(success_trajectories)} success trajectories")
             print(f"Found {len(failure_trajectories)} failure trajectories")
 
+            # Curate the exact number requested
+            selected_success = success_trajectories[:num_success]
+            selected_failure = failure_trajectories[:num_failure]
+            
             # Combine trajectories to process
-            trajectories_to_process = (
-                success_trajectories[:num_success] + 
-                failure_trajectories[:num_failure]
-            )
+            trajectories_to_process = selected_success + selected_failure
 
             print(f"Processing {len(trajectories_to_process)} trajectories in parallel...")
+            print(f"  - {len(selected_success)} success trajectories")
+            print(f"  - {len(selected_failure)} failure trajectories")
             
             # Submit all download and conversion tasks to Ray
             futures = []
@@ -501,17 +527,22 @@ if __name__ == "__main__":
     output_dir = "./robodm_trajectories"
 
     try:
-        # New parallel download and conversion approach
+        # Parallel download and conversion with 300 success + 100 failure trajectories
         print("Starting parallel download and conversion...")
         successful_paths = processor.download_sample_trajectories(
             output_dir=output_dir, 
-            num_success=20, 
-            num_failure=20
+            num_success=300, 
+            num_failure=100
         )
         
         print(f"\nSuccessfully processed {len(successful_paths)} trajectories:")
-        for path in successful_paths:
-            print(f"  - {path}")
+        print(f"Output directory: {output_dir}")
+        
+        # Count success/failure trajectories
+        success_count = len([p for p in successful_paths if "success_" in p])
+        failure_count = len([p for p in successful_paths if "failure_" in p])
+        print(f"  - {success_count} success trajectories")
+        print(f"  - {failure_count} failure trajectories")
             
     except Exception as e:
         print(f"Error during processing: {e}")
