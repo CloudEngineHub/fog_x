@@ -52,7 +52,7 @@ class VisionLanguageModel:
     """Vision-language model for analyzing images using shared VLM service."""
 
     def __init__(self,
-                 model: str = "Qwen/Qwen2.5-VL-7B-Instruct",
+                 model: str = "Qwen/Qwen2.5-VL-32B-Instruct",
                  temperature: float = 0.1,
                  max_tokens: int = 256,
                  trust_remote_code: bool = True,
@@ -298,7 +298,7 @@ class VisionLanguageModelTool(BaseTool):
 
     def __init__(
         self,
-        model: str = "Qwen/Qwen2.5-VL-7B-Instruct",
+        model: str = "Qwen/Qwen2.5-VL-32B-Instruct",
         temperature: float = 0.1,
         max_tokens: int = 256,
         **kwargs,
@@ -349,7 +349,7 @@ class VisionLanguageModelTool(BaseTool):
             ],
             tags=["vision", "language", "analysis", "robotic"],
             parameters={
-                "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+                "model": "Qwen/Qwen2.5-VL-32B-Instruct",
                 "temperature": 0.1,
                 "max_tokens": 256
             },
@@ -384,7 +384,7 @@ class VisionLanguageModelTool(BaseTool):
         
         # Reinitialize shared VLM service with new config
         self.vlm_service.initialize(
-            model=self.config.get("model", "Qwen/Qwen2.5-VL-7B-Instruct"),
+            model=self.config.get("model", "Qwen/Qwen2.5-VL-32B-Instruct"),
             temperature=self.config.get("temperature", 0.1),
             max_tokens=self.config.get("max_tokens", 256),
             trust_remote_code=self.config.get("trust_remote_code", True),
@@ -394,7 +394,7 @@ class VisionLanguageModelTool(BaseTool):
         
         # Recreate VLM instance with new config
         self.vlm = VisionLanguageModel(
-            model=self.config.get("model", "Qwen/Qwen2.5-VL-7B-Instruct"),
+            model=self.config.get("model", "Qwen/Qwen2.5-VL-32B-Instruct"),
             temperature=self.config.get("temperature", 0.1),
             max_tokens=self.config.get("max_tokens", 256),
             trust_remote_code=self.config.get("trust_remote_code", True),

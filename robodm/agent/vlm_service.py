@@ -50,7 +50,7 @@ class VLMService:
             self._initialized = True
     
     def initialize(self, 
-                   model: str = "Qwen/Qwen2.5-VL-7B-Instruct",
+                   model: str = "Qwen/Qwen2.5-VL-32B-Instruct",
                    temperature: float = 0.1,
                    max_tokens: int = 256,
                    base_url: str = "http://localhost:30000/v1",

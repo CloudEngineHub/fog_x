@@ -14,7 +14,7 @@ import robodm
 from robodm import Trajectory
 
 
-@ray.remote
+@ray.remote(num_cpus=4)
 def download_and_convert_trajectory(trajectory_path: str, output_dir: str, temp_dir: str) -> Tuple[bool, str, str]:
     """
     Download and convert a single DROID trajectory to RoboDM format.
@@ -109,6 +109,29 @@ class DROIDProcessor:
         cap.release()
         return np.array(frames)
 
+    def split_stereo_frames(self, stereo_frames: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Split side-by-side stereo frames into separate left and right frame arrays.
+        
+        Args:
+            stereo_frames: Array of stereo frames with shape (num_frames, height, width, channels)
+                          where width contains both left and right images side-by-side
+            
+        Returns:
+            Tuple of (left_frames, right_frames), each with shape (num_frames, height, width/2, channels)
+        """
+        if len(stereo_frames) == 0:
+            return np.array([]), np.array([])
+            
+        num_frames, height, width, channels = stereo_frames.shape
+        half_width = width // 2
+        
+        # Split each frame horizontally
+        left_frames = stereo_frames[:, :, :half_width, :]
+        right_frames = stereo_frames[:, :, half_width:, :]
+        
+        return left_frames, right_frames
+
     def load_droid_trajectory(self, droid_path: str) -> Dict:
         """
         Load a DROID trajectory from downloaded files.
@@ -192,12 +215,13 @@ class DROIDProcessor:
                     stereo_filename = os.path.basename(metadata[mp4_key]).replace(".mp4", "-stereo.mp4")
                     stereo_path = os.path.join(droid_path, "recordings", "MP4", stereo_filename)
                     if os.path.exists(stereo_path):
-                        images = self.load_mp4_frames(stereo_path)
-                        if len(images) > 0:
-                            # For stereo, use right camera name
-                            right_cam_name = cam_name.replace("left", "right")
-                            trajectory_data["images"][right_cam_name] = images
-                            print(f"  Loaded {right_cam_name}: shape {images.shape}")
+                        stereo_images = self.load_mp4_frames(stereo_path)
+                        if len(stereo_images) > 0:
+                            left_images, right_images = self.split_stereo_frames(stereo_images)
+                            trajectory_data["images"][cam_name] = left_images
+                            trajectory_data["images"][cam_name.replace("left", "right")] = right_images
+                            print(f"  Loaded {cam_name}: shape {left_images.shape}")
+                            print(f"  Loaded {cam_name.replace('left', 'right')}: shape {right_images.shape}")
 
         return trajectory_data
 
@@ -531,8 +555,8 @@ if __name__ == "__main__":
         print("Starting parallel download and conversion...")
         successful_paths = processor.download_sample_trajectories(
             output_dir=output_dir, 
-            num_success=300, 
-            num_failure=100
+            num_success=50, 
+            num_failure=50
         )
         
         print(f"\nSuccessfully processed {len(successful_paths)} trajectories:")

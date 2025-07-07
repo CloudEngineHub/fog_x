@@ -9,12 +9,13 @@ This script demonstrates the full RoboDM Agent capabilities:
 5. Shows how VLM tools can be used during filtering
 """
 
-# python3 -m sglang.launch_server   --model-path Qwen/Qwen2.5-VL-7B-Instruct   --host 0.0.0.0   --port 30000 
+# python3 -m sglang.launch_server   --model-path Qwen/Qwen2.5-VL-32B-Instruct   --host 0.0.0.0   --port 30000 
 
 import os
 import time
+import argparse
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 import numpy as np
 import cv2
@@ -30,15 +31,23 @@ from robodm.agent.tools import ToolsManager
 class DROIDSuccessDetector:
     """Enhanced DROID success/failure detector using RoboDM Agent system."""
 
-    def __init__(self):
-        """Initialize the detector with Agent capabilities."""
+    def __init__(self, max_trajectories: Optional[int] = None):
+        """Initialize the detector with Agent capabilities.
+        
+        Args:
+            max_trajectories: Maximum number of trajectories to process. If None, processes all trajectories.
+        """
         print("Initializing RoboDM Agent with VLM tools...")
+        
+        self.max_trajectories = max_trajectories
+        if max_trajectories is not None:
+            print(f"Will limit processing to maximum {max_trajectories} trajectories")
         
         # Configure tools for the Agent
         self.tools_config = {
             "tools": {
                 "robo2vlm": {
-                    "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+                    "model": "Qwen/Qwen2.5-VL-32B-Instruct",
                     "temperature": 0.1,
                     "max_tokens": 4096,
                     "context_length": 1024
@@ -85,7 +94,47 @@ class DROIDSuccessDetector:
             config=config
         )
         
-        print(f"Created VLADataset with {dataset.count()} trajectory files")
+        total_trajectories = dataset.count()
+        print(f"Found {total_trajectories} trajectory files")
+        
+        # Apply max_trajectories limit if specified
+        if self.max_trajectories is not None and total_trajectories > self.max_trajectories:
+            print(f"Limiting to {self.max_trajectories} trajectories (out of {total_trajectories} total)")
+            # Use take() to limit the number of trajectories
+            limited_items = dataset.take(self.max_trajectories)
+            
+            # Create a new VLADataset from the limited items
+            # We need to extract file paths from the limited items
+            if limited_items:
+                # Extract file paths from the limited items 
+                # The items are currently just string paths from the Ray dataset
+                limited_file_paths = [item if isinstance(item, str) else item.get("item", str(item)) 
+                                    for item in limited_items]
+                
+                # Create a new VLADataset with limited file paths
+                import ray.data as rd
+                limited_ray_dataset = rd.from_items(limited_file_paths)
+                if config.shuffle:
+                    limited_ray_dataset = limited_ray_dataset.random_shuffle()
+                
+                # Create new VLADataset instance with limited data
+                limited_dataset = VLADataset.__new__(VLADataset)
+                limited_dataset.path = dataset.path
+                limited_dataset.return_type = dataset.return_type
+                limited_dataset.config = dataset.config
+                limited_dataset.file_paths = limited_file_paths
+                limited_dataset.ray_dataset = limited_ray_dataset
+                limited_dataset.metadata_manager = dataset.metadata_manager
+                limited_dataset._schema = None
+                limited_dataset._stats = None
+                limited_dataset._is_loaded = False
+                limited_dataset._has_file_paths = True
+                
+                dataset = limited_dataset
+                print(f"Limited dataset created with {dataset.count()} trajectory files")
+        else:
+            print(f"Processing all {total_trajectories} trajectory files")
+        
         print(f"Dataset type: {type(dataset)}")
         print(f"Has _is_loaded: {hasattr(dataset, '_is_loaded')}")
         print(f"Is loaded: {dataset._is_loaded}")
@@ -227,25 +276,35 @@ class DROIDSuccessDetector:
         print("F1 MATRIX CALCULATION")
         print("=" * 60)
         
+        # Create output directory for F1 matrix results
+        f1_output_dir = Path("./f1_matrix_results")
+        f1_output_dir.mkdir(exist_ok=True)
+        
         # Transform to extract labels and predictions
         def extract_labels_and_predictions(trajectory: Dict[str, Any]) -> Dict[str, Any]:
-            """Extract ground truth and VLM predictions for F1 calculation."""
+            """Extract ground truth and VLM predictions for F1 calculation with file saving."""
             from pathlib import Path
             import numpy as np
+            import cv2
             
             file_path = trajectory.get("__file_path__", "")
             ground_truth = "success" in file_path.lower()
+            traj_name = Path(file_path).stem
             
-            # Get VLM prediction (simplified version without saving files)
+            # Get VLM prediction and save all results
             vlm_prediction = False
+            vlm_response = "No VLM analysis performed"
+            
             try:
                 # Find camera keys
                 camera_keys = [k for k in trajectory.keys() 
                              if "observation/images/" in k or "image" in k.lower()]
+                print(f"Camera keys: {camera_keys}")
                 
                 if camera_keys:
                     primary_camera = camera_keys[3] if len(camera_keys) > 1 else camera_keys[0]
                     frames = trajectory.get(primary_camera, [])
+                    print(f"Frames: {len(frames)}, {frames[0].shape}")
                     
                     if len(frames) >= 4:
                         # Select 4 frames: start, 1/3, 2/3, and end
@@ -257,7 +316,6 @@ class DROIDSuccessDetector:
                         resized_frames = []
                         for frame in selected_frames:
                             if frame.shape[:2] != (h, w):
-                                import cv2
                                 frame = cv2.resize(frame, (w, h))
                             resized_frames.append(frame)
                         
@@ -265,24 +323,64 @@ class DROIDSuccessDetector:
                         bottom_row = np.hstack([resized_frames[2], resized_frames[3]])
                         stitched_frame = np.vstack([top_row, bottom_row])
                         
+                        # Save input image
+                        image_filename = f1_output_dir / f"{traj_name}_input.jpg"
+                        cv2.imwrite(str(image_filename), cv2.cvtColor(stitched_frame, cv2.COLOR_RGB2BGR))
+                        
                         # Use VLM to get prediction
                         from robodm.agent.vlm_service import get_vlm_service
                         vlm_service = get_vlm_service()
                         vlm_service.initialize()
                         
-                        vlm_prompt = "These are 4 frames from a robot trajectory. Does this trajectory look successful? Answer yes or no."
+                        vlm_prompt = "These are 4 frames from a robot trajectory. Does this trajectory look successful? First answer yes or no, then explain why."
                         vlm_response = vlm_service.analyze_image(stitched_frame, vlm_prompt)
-                        print(vlm_response)
                         vlm_prediction = "yes" in vlm_response.lower()
                         
+                        print(f"🔍 F1 Analysis for {traj_name}: GT={ground_truth}, VLM={vlm_prediction}")
+                        
+                    elif len(frames) > 0:
+                        # If fewer than 4 frames, just use the last frame
+                        stitched_frame = frames[-1]
+                        
+                        # Save input image
+                        image_filename = f1_output_dir / f"{traj_name}_input.jpg"
+                        cv2.imwrite(str(image_filename), cv2.cvtColor(stitched_frame, cv2.COLOR_RGB2BGR))
+                        
+                        # Use VLM to get prediction
+                        from robodm.agent.vlm_service import get_vlm_service
+                        vlm_service = get_vlm_service()
+                        vlm_service.initialize()
+                        
+                        vlm_prompt = "This is the final frame from a robot trajectory. Does this trajectory look successful? Answer yes or no."
+                        vlm_response = vlm_service.analyze_image(stitched_frame, vlm_prompt)
+                        vlm_prediction = "yes" in vlm_response.lower()
+                        
+                        print(f"🔍 F1 Analysis for {traj_name}: GT={ground_truth}, VLM={vlm_prediction}")
+                        
             except Exception as e:
-                print(f"Error in VLM prediction: {e}")
-                vlm_prediction = ground_truth  # fallback to ground truth
+                print(f"Error in VLM prediction for {traj_name}: {e}")
+                vlm_prediction = ground_truth
+                vlm_response = f"Error occurred: {str(e)}"
+            
+            # Save results to file
+            results_filename = f1_output_dir / f"{traj_name}_results.txt"
+            with open(results_filename, 'w') as f:
+                f.write(f"F1 Matrix Calculation Results\n")
+                f.write(f"=============================\n")
+                f.write(f"Trajectory: {traj_name}\n")
+                f.write(f"File path: {file_path}\n")
+                f.write(f"Ground truth (success): {ground_truth}\n")
+                f.write(f"VLM prediction (success): {vlm_prediction}\n")
+                f.write(f"Prediction correct: {ground_truth == vlm_prediction}\n")
+                f.write(f"\nVLM Prompt:\n{vlm_prompt if 'vlm_prompt' in locals() else 'No prompt used'}\n")
+                f.write(f"\nVLM Response:\n{vlm_response}\n")
+                f.write(f"\nInput image saved as: {traj_name}_input.jpg\n")
             
             return {
-                "trajectory_name": Path(file_path).stem,
+                "trajectory_name": traj_name,
                 "ground_truth": ground_truth,
-                "vlm_prediction": vlm_prediction
+                "vlm_prediction": vlm_prediction,
+                "vlm_response": vlm_response
             }
         
         # Apply transformation to get all predictions using VLADataset's map
@@ -315,6 +413,12 @@ class DROIDSuccessDetector:
         f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
         accuracy = (true_positives + true_negatives) / len(results)
         
+        print(f"\nDetailed Results:")
+        for result in results:
+            status = "✅" if result["ground_truth"] == result["vlm_prediction"] else "❌"
+            print(f"{status} {result['trajectory_name']}: GT={result['ground_truth']}, Pred={result['vlm_prediction']}")
+    
+    
         # Print F1 Matrix
         print("\nConfusion Matrix:")
         print("                 Predicted")
@@ -328,10 +432,7 @@ class DROIDSuccessDetector:
         print(f"Recall:    {recall:.3f}")
         print(f"F1 Score:  {f1_score:.3f}")
         
-        print(f"\nDetailed Results:")
-        for result in results:
-            status = "✅" if result["ground_truth"] == result["vlm_prediction"] else "❌"
-            print(f"{status} {result['trajectory_name']}: GT={result['ground_truth']}, Pred={result['vlm_prediction']}")
+
         
         return f1_score
 
@@ -341,10 +442,22 @@ def main():
     print("RoboDM VLADataset and Agent Demo")
     print("=" * 60)
 
-    robodm_dir = "./robodm_trajectories"
+    # Configuration
+    parser = argparse.ArgumentParser(description="Run the DROID VLM demo")
+    parser.add_argument("--data_dir", type=str, default="./robodm_trajectories", help="Directory containing RoboDM trajectory files")
+    parser.add_argument("--max_trajectories", type=int, default=100, help="Maximum number of trajectories to process")
+    args = parser.parse_args()
+
+    robodm_dir = args.data_dir
+    max_trajectories = args.max_trajectories
+    
+    print(f"Configuration:")
+    print(f"  Data directory: {robodm_dir}")
+    print(f"  Max trajectories: {max_trajectories if max_trajectories is not None else 'All'}")
+    
     # Step 3: Create VLADataset (with file paths only)
     print("\n3. Creating VLADataset...")
-    detector = DROIDSuccessDetector()
+    detector = DROIDSuccessDetector(max_trajectories=max_trajectories)
     dataset = detector.create_robodm_dataset(robodm_dir)
     
     # Step 5: Calculate F1 Matrix
