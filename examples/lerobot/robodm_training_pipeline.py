@@ -95,8 +95,8 @@ class RoboDMToLeRobotBridge:
         else:
             return []  # No valid data found
         
-        # DiffusionPolicy expects sequences, so we need horizon=16 for actions
-        horizon = 16
+        # DiffusionPolicy expects sequences with full prediction horizon
+        horizon = 16  # This should match DiffusionPolicy's horizon (not n_action_steps)
         timesteps = []
         
         # Create training samples with action sequences
@@ -138,19 +138,22 @@ class RoboDMToLeRobotBridge:
                             action_is_pad_sequence.append(False)
                         else:
                             # Pad with zeros
-                            action_sequence.append(torch.zeros(2, dtype=torch.float32))  # Assuming 2D actions
+                            action_dim = action_data.shape[0] if hasattr(action_data, 'shape') else 2
+                            action_sequence.append(torch.zeros(action_dim, dtype=torch.float32))
                             action_is_pad_sequence.append(True)
                     else:
                         # Pad with zeros when we run out of actions
-                        action_sequence.append(torch.zeros(2, dtype=torch.float32))  # Assuming 2D actions
+                        action_dim = action_sequence[0].shape[0] if action_sequence else 2
+                        action_sequence.append(torch.zeros(action_dim, dtype=torch.float32))
                         action_is_pad_sequence.append(True)
                 
                 # Stack into sequence tensors
                 timestep['action'] = torch.stack(action_sequence)  # Shape: [horizon, action_dim]
                 timestep['action_is_pad'] = torch.tensor(action_is_pad_sequence, dtype=torch.bool)  # Shape: [horizon]
             else:
-                # No action data at all
-                timestep['action'] = torch.zeros(horizon, 2, dtype=torch.float32)  # Shape: [horizon, action_dim]
+                # No action data at all - use default action dimension
+                default_action_dim = 2  # You should adjust this to match your robot's action space
+                timestep['action'] = torch.zeros(horizon, default_action_dim, dtype=torch.float32)  # Shape: [horizon, action_dim]
                 timestep['action_is_pad'] = torch.ones(horizon, dtype=torch.bool)  # All padded
             
             timesteps.append(timestep)
@@ -176,10 +179,30 @@ class RoboDMToLeRobotBridge:
                         # Make a copy to ensure the array is writable
                         image_data = image_data.copy()
                         # Convert to tensor, ensure it's in CHW format
-                        if len(image_data.shape) == 3 and image_data.shape[2] == 3:  # HWC format
-                            image_tensor = torch.from_numpy(image_data).permute(2, 0, 1).float() / 255.0
-                        else:  # Already in CHW format
-                            image_tensor = torch.from_numpy(image_data).float() / 255.0
+                        if len(image_data.shape) == 3:
+                            # Check if it's HWC format (height, width, channels)
+                            if image_data.shape[2] == 3:  # HWC format
+                                image_tensor = torch.from_numpy(image_data).permute(2, 0, 1).float() / 255.0
+                            elif image_data.shape[0] == 3:  # Already CHW format
+                                image_tensor = torch.from_numpy(image_data).float() / 255.0
+                            else:
+                                # Unknown format, assume HWC and convert
+                                image_tensor = torch.from_numpy(image_data).permute(2, 0, 1).float() / 255.0
+                        else:
+                            # Handle 2D images by adding channel dimension
+                            if len(image_data.shape) == 2:
+                                image_tensor = torch.from_numpy(image_data).unsqueeze(0).float() / 255.0
+                            else:
+                                # Fallback: try to reshape to CHW format
+                                image_tensor = torch.from_numpy(image_data).float() / 255.0
+                                if image_tensor.dim() == 1:
+                                    # Try to reshape to square image
+                                    size = int(np.sqrt(image_tensor.shape[0] / 3))
+                                    if size * size * 3 == image_tensor.shape[0]:
+                                        image_tensor = image_tensor.view(3, size, size)
+                                    else:
+                                        # Create placeholder if can't reshape
+                                        image_tensor = torch.zeros(3, 96, 96, dtype=torch.float32)
                         image_sequence.append(image_tensor)
                     else:
                         # Create a placeholder image if no image data
@@ -211,17 +234,37 @@ class RoboDMToLeRobotBridge:
                     # Make a copy to ensure the array is writable
                     image_data = image_data.copy()
                     # Convert to tensor, ensure it's in CHW format
-                    if len(image_data.shape) == 3 and image_data.shape[2] == 3:  # HWC format
-                        image_tensor = torch.from_numpy(image_data).permute(2, 0, 1).float() / 255.0
-                    else:  # Already in CHW format
-                        image_tensor = torch.from_numpy(image_data).float() / 255.0
+                    if len(image_data.shape) == 3:
+                        # Check if it's HWC format (height, width, channels)
+                        if image_data.shape[2] == 3:  # HWC format
+                            image_tensor = torch.from_numpy(image_data).permute(2, 0, 1).float() / 255.0
+                        elif image_data.shape[0] == 3:  # Already CHW format
+                            image_tensor = torch.from_numpy(image_data).float() / 255.0
+                        else:
+                            # Unknown format, assume HWC and convert
+                            image_tensor = torch.from_numpy(image_data).permute(2, 0, 1).float() / 255.0
+                    else:
+                        # Handle 2D images by adding channel dimension
+                        if len(image_data.shape) == 2:
+                            image_tensor = torch.from_numpy(image_data).unsqueeze(0).float() / 255.0
+                        else:
+                            # Fallback: try to reshape to CHW format
+                            image_tensor = torch.from_numpy(image_data).float() / 255.0
+                            if image_tensor.dim() == 1:
+                                # Try to reshape to square image
+                                size = int(np.sqrt(image_tensor.shape[0] / 3))
+                                if size * size * 3 == image_tensor.shape[0]:
+                                    image_tensor = image_tensor.view(3, size, size)
+                                else:
+                                    # Create placeholder if can't reshape
+                                    image_tensor = torch.zeros(3, 96, 96, dtype=torch.float32)
                     timestep['observation.image'] = image_tensor
                 else:
                     # Create a placeholder image if no image data
-                    timestep['observation.image'] = torch.zeros(3, 64, 64, dtype=torch.float32)
+                    timestep['observation.image'] = torch.zeros(3, 96, 96, dtype=torch.float32)
             else:
                 # Create a placeholder image if frame is out of range
-                timestep['observation.image'] = torch.zeros(3, 64, 64, dtype=torch.float32)
+                timestep['observation.image'] = torch.zeros(3, 96, 96, dtype=torch.float32)
     
     def get_torch_dataset(self) -> torch_data.Dataset:
         """Get PyTorch dataset."""
@@ -296,6 +339,10 @@ class RoboDMToLeRobotBridge:
         if all_actions:
             try:
                 actions = torch.stack(all_actions)
+                # Transpose actions from [samples, horizon, action_dim] to [samples, action_dim, horizon]
+                # to match the expected format for DiffusionPolicy
+                if len(actions.shape) == 3:
+                    actions = actions.transpose(1, 2)  # [samples, action_dim, horizon]
                 stats['action'] = {
                     'mean': actions.mean(dim=0),
                     'std': actions.std(dim=0),

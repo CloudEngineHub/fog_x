@@ -149,64 +149,58 @@ def run_complete_pipeline(dataset_name: str, num_episodes: int = None,
             policy_features = pipeline.get_policy_features()
             dataset_stats = pipeline.get_dataset_stats()
             
+            
             # Create policy configuration
             cfg = DiffusionConfig(
                 input_features=policy_features['input_features'],
                 output_features=policy_features['output_features'],
-                crop_shape=None  # Disable cropping since our images are 96x96
+                crop_shape=None,  # Disable cropping since our images are 96x96
+                horizon=16  # Match the horizon used in RoboDM data generation
             )
+            
             
             # Create and setup policy
             policy = DiffusionPolicy(cfg, dataset_stats=dataset_stats)
             policy.train()
             policy.to(device)
             
-            # Setup training with custom collate function for DiffusionPolicy
+            # Use observation sequence collate function for DiffusionPolicy
+            from torch.utils.data import default_collate
+            
             def collate_fn(batch):
-                """Custom collate function that creates observation sequences for DiffusionPolicy."""
-                result = {}
+                """Collate function for DiffusionPolicy training with RoboDM data."""
+                if not batch:
+                    return {}
+                
+                # Use default collate for everything
+                from torch.utils.data import default_collate
+                collated = default_collate(batch)
+                
                 batch_size = len(batch)
                 n_obs_steps = 2  # DiffusionPolicy default
                 
-                # Stack all non-sequence keys normally
-                for key in batch[0].keys():
-                    if key not in ['observation.image', 'observation.state']:
-                        values = [item[key] for item in batch if item[key] is not None]
-                        if values and all(isinstance(v, torch.Tensor) for v in values):
-                            try:
-                                result[key] = torch.stack(values)
-                            except RuntimeError:
-                                result[key] = values[0].unsqueeze(0).repeat(len(batch), *([1] * (values[0].dim())))
-                        elif values:
-                            result[key] = values[0] if len(values) == 1 else values
+                # Create observation sequences for DiffusionPolicy
+                if 'observation.image' in collated:
+                    # Images: [B, C, H, W] -> [B, T, C, H, W]
+                    images = collated['observation.image']
+                    # Create temporal sequence by repeating current observation
+                    image_seq = images.unsqueeze(1).repeat(1, n_obs_steps, 1, 1, 1)
+                    collated['observation.image'] = image_seq
                 
-                # Handle observation sequences specially
-                if 'observation.image' in batch[0]:
-                    # Create observation.images with proper sequence format
-                    images = []
-                    for i in range(batch_size):
-                        # Get current observation
-                        current_obs = batch[i]['observation.image']
-                        # For simplicity, repeat current observation for n_obs_steps
-                        # In a proper implementation, you'd track actual historical observations
-                        obs_sequence = current_obs.unsqueeze(0).repeat(n_obs_steps, 1, 1, 1)  # [n_obs_steps, C, H, W]
-                        obs_sequence = obs_sequence.unsqueeze(1)  # Add camera dim: [n_obs_steps, 1, C, H, W]
-                        images.append(obs_sequence)
-                    result['observation.images'] = torch.stack(images)  # [B, n_obs_steps, 1, C, H, W]
+                if 'observation.state' in collated:
+                    # States: [B, state_dim] -> [B, T, state_dim]
+                    states = collated['observation.state']
+                    state_seq = states.unsqueeze(1).repeat(1, n_obs_steps, 1)
+                    collated['observation.state'] = state_seq
                 
-                if 'observation.state' in batch[0]:
-                    # Create observation.state sequence
-                    states = []
-                    for i in range(batch_size):
-                        current_state = batch[i]['observation.state']
-                        # Repeat current state for n_obs_steps
-                        state_sequence = current_state.unsqueeze(0).repeat(n_obs_steps, 1)  # [n_obs_steps, state_dim]
-                        states.append(state_sequence)
-                    result['observation.state'] = torch.stack(states)  # [B, n_obs_steps, state_dim]
+                if 'action' in collated:
+                    # Actions: [B, horizon, action_dim] -> [B, action_dim, horizon]
+                    if collated['action'].ndim == 3:
+                        collated['action'] = collated['action'].transpose(1, 2)
                 
-                return result
+                return collated
             
-            dataloader = pipeline.get_dataloader(batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+            dataloader = pipeline.get_dataloader(batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=collate_fn)
             optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
             
             # Training loop
@@ -219,6 +213,7 @@ def run_complete_pipeline(dataset_name: str, num_episodes: int = None,
                 for batch in dataloader:
                     batch = {k: (v.to(device) if isinstance(v, torch.Tensor) else v) 
                             for k, v in batch.items()}
+                    
                     
                     loss, _ = policy.forward(batch)
                     loss.backward()
@@ -317,7 +312,7 @@ Examples:
     # Dataset arguments
     parser.add_argument("--dataset", type=str, default="lerobot/pusht",
                        help="LeRobot dataset name (e.g., lerobot/pusht)")
-    parser.add_argument("--num_episodes", type=int, default=50,
+    parser.add_argument("--num_episodes", type=int, default=5,
                        help="Number of episodes to convert (default: 50)")
     parser.add_argument("--robodm_data_dir", type=str, default=None,
                        help="Directory containing existing RoboDM data (skips ingestion)")
