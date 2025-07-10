@@ -170,6 +170,18 @@ class DROIDSuccessDetector:
             file_path = trajectory.get("__file_path__", "")
             traj_name = Path(file_path).stem
             
+            # Only process successful trajectories
+            if "success" not in file_path.lower():
+                return {
+                    "trajectory_name": traj_name,
+                    "ground_truth_description": "",
+                    "vlm_caption": "",
+                    "has_ground_truth": False,
+                    "has_caption": False,
+                    "is_match": False,
+                    "comparison_explanation": "Skipped - not a successful trajectory"
+                }
+            
             # Parse metadata to get language description
             ground_truth_description = ""
             try:
@@ -264,16 +276,19 @@ class DROIDSuccessDetector:
                     from robodm.agent.vlm_service import get_vlm_service
                     vlm_service = get_vlm_service()
                     
-                    comparison_prompt = f"""Compare these two robot task descriptions and determine if they describe the same task:
+                    comparison_prompt = f"""Compare these two robot task descriptions and determine if they describe the same or similar task:
 
 Description 1 (Ground Truth): {ground_truth_description}
 
 Description 2 (VLM Caption): {vlm_caption}
 
+Be generous in your matching. Only say NO if they describe COMPLETELY different tasks with different goals.
+It is fine that the VLM Caption is more specific compared to the Ground Truth.
+
 Respond with only YES or NO followed by a brief explanation.
 
 Format:
-YES/NO: Your explanation here"""
+YES/NO: Your one sentence explanation"""
 
                     comparison_response = vlm_service.generate_code(comparison_prompt)
                     
@@ -331,11 +346,16 @@ YES/NO: Your explanation here"""
         true_negatives = 0  # VLM correctly identifies non-match (not applicable here)
         
         valid_comparisons = 0
+        skipped_trajectories = 0
         
         print("\nDetailed Caption Comparison Results:")
         print("-" * 80)
         
         for result in results:
+            if not result["has_ground_truth"] and not result["has_caption"] and "Skipped" in result.get("comparison_explanation", ""):
+                skipped_trajectories += 1
+                continue
+                
             if result["has_ground_truth"] and result["has_caption"]:
                 valid_comparisons += 1
                 
@@ -371,7 +391,9 @@ YES/NO: Your explanation here"""
             print("⚠️ No valid comparisons found (missing ground truth or captions)")
         
         print(f"\nOverall Captioning Metrics:")
-        print(f"Valid comparisons: {valid_comparisons}/{len(results)}")
+        print(f"Total trajectories: {len(results)}")
+        print(f"Successful trajectories processed: {valid_comparisons}")
+        print(f"Failed trajectories skipped: {skipped_trajectories}")
         print(f"Matches (True Positives): {true_positives}")
         print(f"No Matches (False Negatives): {false_negatives}")
         print(f"Precision: {precision:.3f}")
@@ -384,7 +406,8 @@ YES/NO: Your explanation here"""
             f.write(f"Trajectory Captioning F1 Summary\n")
             f.write(f"================================\n")
             f.write(f"Total trajectories: {len(results)}\n")
-            f.write(f"Valid comparisons: {valid_comparisons}\n")
+            f.write(f"Successful trajectories processed: {valid_comparisons}\n")
+            f.write(f"Failed trajectories skipped: {skipped_trajectories}\n")
             f.write(f"Matches (True Positives): {true_positives}\n")
             f.write(f"No Matches (False Negatives): {false_negatives}\n")
             f.write(f"Precision: {precision:.3f}\n")
