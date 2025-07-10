@@ -141,19 +141,19 @@ class DROIDSuccessDetector:
         
         return dataset
 
-    def calculate_trajectory_captioning_f1(self, dataset: VLADataset):
+    def calculate_trajectory_captioning_accuracy(self, dataset: VLADataset):
         """
-        Calculate F1 score for trajectory captioning by comparing VLM-generated captions
+        Calculate accuracy for trajectory captioning by comparing VLM-generated captions
         with ground truth language descriptions from metadata using LLM for semantic matching.
         
         Args:
             dataset: VLADataset with loaded trajectories
             
         Returns:
-            float: F1 score for caption similarity
+            float: Accuracy of caption matching
         """
         print("\n" + "=" * 60)
-        print("TRAJECTORY CAPTIONING F1 CALCULATION")
+        print("TRAJECTORY CAPTIONING ACCURACY CALCULATION")
         print("=" * 60)
         
         # Create output directory for captioning results
@@ -339,12 +339,8 @@ YES/NO: Your one sentence explanation"""
         results_dataset = dataset.map(extract_caption_and_description).materialize()
         results = list(results_dataset.iter_rows())
         
-        # Calculate F1 score based on LLM matching
-        true_positives = 0  # VLM correctly identifies matching tasks
-        false_positives = 0  # VLM incorrectly claims match
-        false_negatives = 0  # VLM misses a match
-        true_negatives = 0  # VLM correctly identifies non-match (not applicable here)
-        
+        # Calculate accuracy based on LLM matching
+        correct_matches = 0  # Number of correct caption matches
         valid_comparisons = 0
         skipped_trajectories = 0
         
@@ -360,63 +356,47 @@ YES/NO: Your one sentence explanation"""
                 valid_comparisons += 1
                 
                 # Get the match result
-                predicted_match = result["is_match"]
+                is_match = result["is_match"]
                 
-                # In this context, we assume ground truth is that captions SHOULD match
-                # (since VLM is describing the same trajectory)
-                actual_match = True
+                # Count correct matches (we expect captions to match ground truth)
+                if is_match:
+                    correct_matches += 1
                 
-                if predicted_match and actual_match:
-                    true_positives += 1
-                elif not predicted_match and actual_match:
-                    false_negatives += 1
-                
-                status = "✅" if predicted_match else "❌"
-                print(f"{status} {result['trajectory_name']}: {'MATCH' if predicted_match else 'NO MATCH'}")
+                status = "✅" if is_match else "❌"
+                print(f"{status} {result['trajectory_name']}: {'MATCH' if is_match else 'NO MATCH'}")
                 print(f"   Explanation: {result['comparison_explanation']}")
                 print()
         
-        # Calculate metrics
+        # Calculate accuracy
         if valid_comparisons > 0:
-            # Precision: Of all predicted matches, how many were correct?
-            precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-            
-            # Recall: Of all actual matches, how many did we find?
-            recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
-            
-            # F1 Score
-            f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+            accuracy = correct_matches / valid_comparisons
         else:
-            precision = recall = f1_score = 0
+            accuracy = 0
             print("⚠️ No valid comparisons found (missing ground truth or captions)")
         
         print(f"\nOverall Captioning Metrics:")
         print(f"Total trajectories: {len(results)}")
         print(f"Successful trajectories processed: {valid_comparisons}")
         print(f"Failed trajectories skipped: {skipped_trajectories}")
-        print(f"Matches (True Positives): {true_positives}")
-        print(f"No Matches (False Negatives): {false_negatives}")
-        print(f"Precision: {precision:.3f}")
-        print(f"Recall:    {recall:.3f}")
-        print(f"F1 Score:  {f1_score:.3f}")
+        print(f"Correct matches: {correct_matches}")
+        print(f"Incorrect matches: {valid_comparisons - correct_matches}")
+        print(f"Accuracy: {accuracy:.3f} ({correct_matches}/{valid_comparisons})")
         
         # Summary of results
-        summary_filename = caption_output_dir / "captioning_f1_summary.txt"
+        summary_filename = caption_output_dir / "captioning_accuracy_summary.txt"
         with open(summary_filename, 'w') as f:
-            f.write(f"Trajectory Captioning F1 Summary\n")
-            f.write(f"================================\n")
+            f.write(f"Trajectory Captioning Accuracy Summary\n")
+            f.write(f"=====================================\n")
             f.write(f"Total trajectories: {len(results)}\n")
             f.write(f"Successful trajectories processed: {valid_comparisons}\n")
             f.write(f"Failed trajectories skipped: {skipped_trajectories}\n")
-            f.write(f"Matches (True Positives): {true_positives}\n")
-            f.write(f"No Matches (False Negatives): {false_negatives}\n")
-            f.write(f"Precision: {precision:.3f}\n")
-            f.write(f"Recall: {recall:.3f}\n")
-            f.write(f"F1 Score: {f1_score:.3f}\n")
+            f.write(f"Correct matches: {correct_matches}\n")
+            f.write(f"Incorrect matches: {valid_comparisons - correct_matches}\n")
+            f.write(f"Accuracy: {accuracy:.3f} ({correct_matches}/{valid_comparisons})\n")
         
         print(f"\n✅ Results saved to {caption_output_dir}/")
         
-        return f1_score
+        return accuracy
 
     def calculate_f1_matrix(self, dataset: VLADataset):
         """
@@ -617,10 +597,10 @@ def main():
     # print("\n5. Calculating F1 Matrix...")
     # detector.calculate_f1_matrix(dataset)
     
-    # Step 6: Calculate Trajectory Captioning F1
-    print("\n6. Calculating Trajectory Captioning F1...")
-    captioning_f1 = detector.calculate_trajectory_captioning_f1(dataset)
-    print(f"\nFinal Trajectory Captioning F1 Score: {captioning_f1:.3f}")
+    # Step 6: Calculate Trajectory Captioning Accuracy
+    print("\n6. Calculating Trajectory Captioning Accuracy...")
+    captioning_accuracy = detector.calculate_trajectory_captioning_accuracy(dataset)
+    print(f"\nFinal Trajectory Captioning Accuracy: {captioning_accuracy:.3f}")
     
     # Cleanup Ray
     if ray.is_initialized():
