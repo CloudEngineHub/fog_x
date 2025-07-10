@@ -250,7 +250,7 @@ class DROIDSuccessDetector:
                         vlm_prompt = (
                             "These are 6 frames from a robot trajectory shown in temporal order "
                             "(left to right, top to bottom). Please describe with one sentence what task the robot "
-                            "is performing in this trajectory. Be concise and specific about the "
+                            "is performing in this trajectory. Be very specific about the "
                             "actions and objects involved."
                         )
                         vlm_caption = vlm_service.analyze_image(stitched_frame, vlm_prompt)
