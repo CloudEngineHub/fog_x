@@ -9,7 +9,7 @@ This script demonstrates the full RoboDM Agent capabilities:
 5. Shows how VLM tools can be used during filtering
 """
 
-# python3 -m sglang.launch_server   --model-path Qwen/Qwen2.5-VL-32B-Instruct   --host 0.0.0.0   --port 30000 
+# python3 -m sglang.launch_server   --model-path Qwen/Qwen2.5-VL-32B-Instruct   --host 0.0.0.0   --port 30000 --tp 8 
 
 import os
 import time
@@ -141,129 +141,259 @@ class DROIDSuccessDetector:
         
         return dataset
 
-    def create_success_filter_function(self) -> callable:
+    def calculate_trajectory_captioning_f1(self, dataset: VLADataset):
         """
-        Create a simple filter function for successful trajectories.
+        Calculate F1 score for trajectory captioning by comparing VLM-generated captions
+        with ground truth language descriptions from metadata using LLM for semantic matching.
         
-        For now, we bypass the planner and write the function directly.
-        This function can use VLM tools during execution.
-        
+        Args:
+            dataset: VLADataset with loaded trajectories
+            
         Returns:
-            Filter function that identifies successful trajectories
+            float: F1 score for caption similarity
         """
-        def filter_successful_trajectories(trajectory: Dict[str, Any]) -> bool:
-            """
-            Filter function to identify successful trajectories.
+        print("\n" + "=" * 60)
+        print("TRAJECTORY CAPTIONING F1 CALCULATION")
+        print("=" * 60)
+        
+        # Create output directory for captioning results
+        caption_output_dir = Path("./trajectory_captioning_results")
+        caption_output_dir.mkdir(exist_ok=True)
+        
+        def extract_caption_and_description(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+            """Extract VLM caption and ground truth description from trajectory."""
+            import json
+            from pathlib import Path
+            import numpy as np
+            import cv2
             
-            This demonstrates:
-            1. Working with trajectory data structure
-            2. Using VLM tools during filtering
-            3. Checking both labels and visual analysis
-            """
-            # First check if we have a success label in the file path
             file_path = trajectory.get("__file_path__", "")
-            has_success_label = "success" in file_path.lower()
-            trajectory["metadata"] = None # TODO: for now, it has serialization error
+            traj_name = Path(file_path).stem
             
-            # For demonstration, we'll use VLM to analyze four frames stitched together
-            # This gives better context of the trajectory progression
+            # Parse metadata to get language description
+            ground_truth_description = ""
+            try:
+                metadata_data = trajectory.get("metadata", None)
+                if metadata_data is not None:
+                    # Handle case where metadata is stored as a numpy array/list from trajectory loading
+                    if isinstance(metadata_data, (list, np.ndarray)) and len(metadata_data) > 0:
+                        metadata_str = metadata_data[0]
+                    else:
+                        metadata_str = metadata_data
+                    
+                    # Parse the JSON string
+                    if metadata_str:
+                        metadata = json.loads(metadata_str)
+                        # Get language instruction from metadata
+                        # Use current_task as it contains the task description in DROID dataset
+                        ground_truth_description = metadata.get("current_task", "")
+                        
+                        # If current_task is not available, try language_instruction fields
+                        if not ground_truth_description:
+                            ground_truth_description = (
+                                metadata.get("language_instruction", "") or
+                                metadata.get("language_instruction_2", "") or
+                                metadata.get("language_instruction_3", "")
+                            )
+            except Exception as e:
+                print(f"Error parsing metadata for {traj_name}: {e}")
+                import traceback
+                traceback.print_exc()
+                
+            
+            # Get VLM caption
+            vlm_caption = ""
             try:
                 # Find camera keys
                 camera_keys = [k for k in trajectory.keys() 
                              if "observation/images/" in k or "image" in k.lower()]
                 
                 if camera_keys:
-                    # Get the primary camera (usually the second one in DROID)
                     primary_camera = camera_keys[3] if len(camera_keys) > 1 else camera_keys[0]
-                    
-                    # Get four frames evenly spaced throughout the trajectory
                     frames = trajectory.get(primary_camera, [])
-                    if len(frames) >= 4:
-                        # Select 4 frames: start, 1/3, 2/3, and end
-                        indices = [0, len(frames)//3, 2*len(frames)//3, len(frames)-1]
+                    
+                    if len(frames) >= 8:
+                        # Extract frames evenly distributed throughout the trajectory
+                        num_frames = 6  # Extract 6 frames for captioning
+                        indices = np.linspace(0, len(frames)-1, num_frames, dtype=int)
                         selected_frames = [frames[i] for i in indices]
                         
-                        # Use OpenCV to stitch frames together in a 2x2 grid
-                        import cv2
+                        # Create 2x3 grid for better trajectory understanding
+                        # Use original frame sizes without resizing
                         
-                        # Ensure all frames are the same size
-                        h, w = selected_frames[0].shape[:2]
-                        resized_frames = []
-                        for frame in selected_frames:
-                            if frame.shape[:2] != (h, w):
-                                frame = cv2.resize(frame, (w, h))
-                            resized_frames.append(frame)
-                        
-                        # Create 2x2 grid
-                        top_row = np.hstack([resized_frames[0], resized_frames[1]])
-                        bottom_row = np.hstack([resized_frames[2], resized_frames[3]])
+                        # Create 2x3 grid
+                        top_row = np.hstack(selected_frames[:3])
+                        bottom_row = np.hstack(selected_frames[3:])
                         stitched_frame = np.vstack([top_row, bottom_row])
                         
-                    elif len(frames) > 0:
-                        # If fewer than 4 frames, just use the last frame
-                        stitched_frame = frames[-1]
-
-                    # IMPORTANT: Create VLM service locally to avoid serialization issues
-                    # Don't capture external tools in the closure as they contain non-serializable objects
+                        # Save input image
+                        image_filename = caption_output_dir / f"{traj_name}_caption_input.jpg"
+                        cv2.imwrite(str(image_filename), cv2.cvtColor(stitched_frame, cv2.COLOR_RGB2BGR))
+                        
+                        # Use VLM to generate caption
+                        from robodm.agent.vlm_service import get_vlm_service
+                        vlm_service = get_vlm_service()
+                        vlm_service.initialize()
+                        
+                        vlm_prompt = (
+                            "These are 6 frames from a robot trajectory shown in temporal order "
+                            "(left to right, top to bottom). Please describe with one sentence what task the robot "
+                            "is performing in this trajectory. Be concise and specific about the "
+                            "actions and objects involved."
+                        )
+                        vlm_caption = vlm_service.analyze_image(stitched_frame, vlm_prompt)
+                        
+                        print(f"📝 Captioning {traj_name}")
+                        print(f"   GT: '{ground_truth_description}...'")
+                        print(f"   VLM: '{vlm_caption}...'")
+                        
+                    else:
+                        print(f"⚠️ Trajectory {traj_name} has only {len(frames)} frames, skipping captioning")
+                        
+            except Exception as e:
+                print(f"Error generating VLM caption for {traj_name}: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # Use LLM to compare descriptions semantically
+            is_match = False
+            comparison_explanation = ""
+            
+            if ground_truth_description and vlm_caption:
+                try:
                     from robodm.agent.vlm_service import get_vlm_service
                     vlm_service = get_vlm_service()
-                    # vlm_service.initialize()
                     
-                    # Import Path for local use
-                    from pathlib import Path
-                    import cv2
+                    comparison_prompt = f"""Compare these two robot task descriptions and determine if they describe the same task:
+
+Description 1 (Ground Truth): {ground_truth_description}
+
+Description 2 (VLM Caption): {vlm_caption}
+
+Respond with only YES or NO followed by a brief explanation.
+
+Format:
+YES/NO: Your explanation here"""
+
+                    comparison_response = vlm_service.generate_code(comparison_prompt)
                     
-                    # Create output directory for VLM inputs/outputs
-                    vlm_output_dir = Path("./vlm_analysis_results")
-                    vlm_output_dir.mkdir(exist_ok=True)
-                    
-                    # Create unique filename based on trajectory name
-                    traj_name = Path(file_path).stem
-                    image_filename = vlm_output_dir / f"{traj_name}_input.jpg"
-                    text_filename = vlm_output_dir / f"{traj_name}_output.txt"
-                    
-                    # Save the stitched frame (VLM input)
-                    cv2.imwrite(str(image_filename), cv2.cvtColor(stitched_frame, cv2.COLOR_RGB2BGR))
-                    
-                    # Use VLM to check for success indicators on the stitched frames
-                    vlm_prompt = "These are 4 frames from the trajectory (start, 1/3, 2/3, end). Anwser the question: Does this trajectory look successful in completing the task? Answer yes or no."
-                    vlm_response = vlm_service.analyze_image(stitched_frame, vlm_prompt)
-                    
-                    # Save the VLM response (VLM output) with additional metadata
-                    with open(text_filename, 'w') as f:
-                        f.write(f"Trajectory: {traj_name}\n")
-                        f.write(f"File path: {file_path}\n")
-                        f.write(f"Has success label: {has_success_label}\n")
-                        f.write(f"Input image saved as: {image_filename.name}\n")
-                        f.write(f"\nVLM Prompt:\n{vlm_prompt}\n")
-                        f.write(f"\nVLM Response:\n{vlm_response}\n")
-                    
-                    print(f"💾 Saved VLM analysis for {traj_name}:")
-                    print(f"   Input image: {image_filename}")
-                    print(f"   Output text: {text_filename}")
-                    print(vlm_response)
-                    
-                    # Check if VLM thinks it's successful
-                    vlm_success = "yes" in vlm_response.lower()
-                    
-                    # Combine label and VLM analysis
-                    # For demo, we'll trust the label but log VLM disagreements
-                    if has_success_label != vlm_success:
-                        print(f"❌ Label and VLM disagree for {Path(file_path).name}: "
-                                f"label={has_success_label}, vlm={vlm_success}")
+                    # Parse the response
+                    response_lower = comparison_response.strip().lower()
+                    if response_lower.startswith("yes"):
+                        is_match = True
+                        comparison_explanation = comparison_response[3:].strip(": ")
+                    elif response_lower.startswith("no"):
+                        is_match = False
+                        comparison_explanation = comparison_response[2:].strip(": ")
                     else:
-                        print(f"✅ Label and VLM agree for {Path(file_path).name}: "
-                                f"label={has_success_label}, vlm={vlm_success}")
+                        # Try to find YES or NO in the response
+                        is_match = "yes" in response_lower.split()[0:3]
+                        comparison_explanation = comparison_response
                     
-                    return has_success_label
-                
-            except Exception as e:
-                print(f"Error in VLM analysis: {e}")
-                # Fall back to label-based detection
+                    print(f"   Match: {'YES' if is_match else 'NO'}")
+                    
+                except Exception as e:
+                    print(f"Error comparing descriptions: {e}")
+                    comparison_explanation = f"Error: {str(e)}"
             
-            return has_success_label
+            # Save results
+            results_filename = caption_output_dir / f"{traj_name}_caption_results.txt"
+            with open(results_filename, 'w') as f:
+                f.write(f"Trajectory Captioning Results\n")
+                f.write(f"============================\n")
+                f.write(f"Trajectory: {traj_name}\n")
+                f.write(f"File path: {file_path}\n")
+                f.write(f"\nGround Truth Description:\n{ground_truth_description}\n")
+                f.write(f"\nVLM Generated Caption:\n{vlm_caption}\n")
+                f.write(f"\nSemantic Comparison:\n")
+                f.write(f"Match: {'YES' if is_match else 'NO'}\n")
+                f.write(f"Explanation: {comparison_explanation}\n")
+                f.write(f"\nInput image saved as: {traj_name}_caption_input.jpg\n")
+            
+            return {
+                "trajectory_name": traj_name,
+                "ground_truth_description": ground_truth_description,
+                "vlm_caption": vlm_caption,
+                "has_ground_truth": bool(ground_truth_description),
+                "has_caption": bool(vlm_caption),
+                "is_match": is_match,
+                "comparison_explanation": comparison_explanation
+            }
         
-        return filter_successful_trajectories
+        # Apply transformation to get all captions
+        results_dataset = dataset.map(extract_caption_and_description).materialize()
+        results = list(results_dataset.iter_rows())
+        
+        # Calculate F1 score based on LLM matching
+        true_positives = 0  # VLM correctly identifies matching tasks
+        false_positives = 0  # VLM incorrectly claims match
+        false_negatives = 0  # VLM misses a match
+        true_negatives = 0  # VLM correctly identifies non-match (not applicable here)
+        
+        valid_comparisons = 0
+        
+        print("\nDetailed Caption Comparison Results:")
+        print("-" * 80)
+        
+        for result in results:
+            if result["has_ground_truth"] and result["has_caption"]:
+                valid_comparisons += 1
+                
+                # Get the match result
+                predicted_match = result["is_match"]
+                
+                # In this context, we assume ground truth is that captions SHOULD match
+                # (since VLM is describing the same trajectory)
+                actual_match = True
+                
+                if predicted_match and actual_match:
+                    true_positives += 1
+                elif not predicted_match and actual_match:
+                    false_negatives += 1
+                
+                status = "✅" if predicted_match else "❌"
+                print(f"{status} {result['trajectory_name']}: {'MATCH' if predicted_match else 'NO MATCH'}")
+                print(f"   Explanation: {result['comparison_explanation']}")
+                print()
+        
+        # Calculate metrics
+        if valid_comparisons > 0:
+            # Precision: Of all predicted matches, how many were correct?
+            precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+            
+            # Recall: Of all actual matches, how many did we find?
+            recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+            
+            # F1 Score
+            f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        else:
+            precision = recall = f1_score = 0
+            print("⚠️ No valid comparisons found (missing ground truth or captions)")
+        
+        print(f"\nOverall Captioning Metrics:")
+        print(f"Valid comparisons: {valid_comparisons}/{len(results)}")
+        print(f"Matches (True Positives): {true_positives}")
+        print(f"No Matches (False Negatives): {false_negatives}")
+        print(f"Precision: {precision:.3f}")
+        print(f"Recall:    {recall:.3f}")
+        print(f"F1 Score:  {f1_score:.3f}")
+        
+        # Summary of results
+        summary_filename = caption_output_dir / "captioning_f1_summary.txt"
+        with open(summary_filename, 'w') as f:
+            f.write(f"Trajectory Captioning F1 Summary\n")
+            f.write(f"================================\n")
+            f.write(f"Total trajectories: {len(results)}\n")
+            f.write(f"Valid comparisons: {valid_comparisons}\n")
+            f.write(f"Matches (True Positives): {true_positives}\n")
+            f.write(f"No Matches (False Negatives): {false_negatives}\n")
+            f.write(f"Precision: {precision:.3f}\n")
+            f.write(f"Recall: {recall:.3f}\n")
+            f.write(f"F1 Score: {f1_score:.3f}\n")
+        
+        print(f"\n✅ Results saved to {caption_output_dir}/")
+        
+        return f1_score
 
     def calculate_f1_matrix(self, dataset: VLADataset):
         """
@@ -460,9 +590,14 @@ def main():
     detector = DROIDSuccessDetector(max_trajectories=max_trajectories)
     dataset = detector.create_robodm_dataset(robodm_dir)
     
-    # Step 5: Calculate F1 Matrix
-    print("\n5. Calculating F1 Matrix...")
-    detector.calculate_f1_matrix(dataset)
+    # # Step 5: Calculate F1 Matrix
+    # print("\n5. Calculating F1 Matrix...")
+    # detector.calculate_f1_matrix(dataset)
+    
+    # Step 6: Calculate Trajectory Captioning F1
+    print("\n6. Calculating Trajectory Captioning F1...")
+    captioning_f1 = detector.calculate_trajectory_captioning_f1(dataset)
+    print(f"\nFinal Trajectory Captioning F1 Score: {captioning_f1:.3f}")
     
     # Cleanup Ray
     if ray.is_initialized():
