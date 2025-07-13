@@ -1,35 +1,22 @@
 """
-Simple DROID ingestion pipeline that combines TFDS and raw trajectory data.
+DROID Dataset Ingestion - Converts downloaded DROID data into RoboDM format.
 """
 
 import os
-import subprocess
-import tempfile
-from pathlib import Path
-from typing import Dict, Optional, Any, List
-import tensorflow_datasets as tfds
-import tensorflow as tf
-import re
-import ray
 import json
+from pathlib import Path
+from typing import Dict, Optional, List
 import numpy as np
 import h5py
 import cv2
 import glob
-import requests
+import ray
 
 import robodm
 from robodm import Trajectory
 
 # Camera names from DROID dataset
 CAMERA_NAMES = ["wrist", "exterior_image_1", "exterior_image_2"]
-
-# URLs to the camera extrinsics JSON files on Hugging Face
-HF_JSON_URLS = {
-    "cam2base_extrinsics": "https://huggingface.co/KarlP/droid/resolve/main/cam2base_extrinsics.json",
-    "cam2cam_extrinsics": "https://huggingface.co/KarlP/droid/resolve/main/cam2cam_extrinsics.json",
-    "cam2base_extrinsic_superset": "https://huggingface.co/KarlP/droid/resolve/main/cam2base_extrinsic_superset.json"
-}
 
 
 def flatten_dict(data, parent_key='', sep='/'):
@@ -44,41 +31,37 @@ def flatten_dict(data, parent_key='', sep='/'):
     return dict(items)
 
 
-def load_hf_camera_extrinsics():
-    """Download and load camera extrinsics from HuggingFace."""
-    cache_dir = Path("./huggingface_cache")
-    cache_dir.mkdir(exist_ok=True)
-    
+def load_hf_camera_extrinsics(cache_dir: Path):
+    """Load camera extrinsics from cached HuggingFace files."""
     hf_extrinsics = {}
     
-    for file_key, url in HF_JSON_URLS.items():
-        cache_path = cache_dir / f"{file_key}.json"
+    json_files = {
+        "cam2base_extrinsics": "cam2base_extrinsics.json",
+        "cam2cam_extrinsics": "cam2cam_extrinsics.json",
+        "cam2base_extrinsic_superset": "cam2base_extrinsic_superset.json"
+    }
+    
+    for file_key, filename in json_files.items():
+        cache_path = cache_dir / filename
         
-        # Download if not cached
-        if not cache_path.exists():
+        if cache_path.exists():
             try:
-                print(f"Downloading {file_key} from Hugging Face...")
-                response = requests.get(url)
-                if response.status_code == 200:
-                    with open(cache_path, 'wb') as f:
-                        f.write(response.content)
-                    print(f"Downloaded {file_key} successfully.")
-                else:
-                    print(f"Failed to download {file_key}: {response.status_code}")
-                    continue
+                with open(cache_path, 'r') as f:
+                    hf_extrinsics[file_key] = json.load(f)
+                print(f"Loaded {file_key} with {len(hf_extrinsics[file_key])} entries.")
             except Exception as e:
-                print(f"Error downloading {file_key}: {e}")
-                continue
-        
-        # Load the JSON file
-        try:
-            with open(cache_path, 'r') as f:
-                hf_extrinsics[file_key] = json.load(f)
-            print(f"Loaded {file_key} with {len(hf_extrinsics[file_key])} entries.")
-        except Exception as e:
-            print(f"Error loading {file_key}: {e}")
+                print(f"Error loading {file_key}: {e}")
     
     return hf_extrinsics
+
+
+def load_camera_intrinsics(download_dir: Path):
+    """Load camera intrinsics from download directory."""
+    intrinsics_path = download_dir / "camera_intrinsics_all.json"
+    if intrinsics_path.exists():
+        with open(intrinsics_path, 'r') as f:
+            return json.load(f)
+    return {}
 
 
 def get_hf_camera_extrinsics(hf_extrinsics, episode_id, camera_serial):
@@ -128,91 +111,54 @@ def split_stereo_frames(stereo_frames: np.ndarray):
 
 
 @ray.remote
-def process_episode_combined(episode, episode_idx: int, output_dir: str, temp_dir: str, hf_extrinsics: Dict):
+def process_episode(episode_dir: Path, output_dir: Path, hf_extrinsics: Dict, camera_intrinsics: Dict):
     """
-    Process a single TFDS episode by:
-    1. Getting TFDS data
-    2. Downloading raw trajectory
-    3. Combining both into a single RoboDM trajectory
+    Process a single downloaded episode and convert to RoboDM format.
     """
     try:
-        # Extract TFDS data
-        tfds_data = episode  # Already pre-extracted
+        episode_id = episode_dir.name
         
-        # Extract episode ID from file path
-        file_path = tfds_data["episode_metadata"]["file_path"]
-        print(file_path)
-        episode_id_match = re.search(r'([^/]+)/trajectory\.h5$', file_path)
-        episode_id = episode_id_match.group(1) if episode_id_match else f"episode_{episode_idx}"
-        
-        # Process all steps from TFDS
-        steps_data = []
-        for step in tfds_data["steps"]:
-            step_dict = {}
+        # Load download metadata
+        download_metadata_path = episode_dir / "download_metadata.json"
+        if not download_metadata_path.exists():
+            print(f"No download metadata found for {episode_id}")
+            return None
             
-            # Extract all fields from the step
-            for key, value in step.items():
-                if isinstance(value, bytes):
-                    step_dict[key] = value.decode("utf-8")
-                elif hasattr(value, 'numpy'):
-                    step_dict[key] = value.numpy()
-                else:
-                    step_dict[key] = value
-            
-            steps_data.append(step_dict)
+        with open(download_metadata_path, 'r') as f:
+            download_metadata = json.load(f)
         
-        # Check if we have TFDS data
+        if not download_metadata.get("download_success", False):
+            print(f"Episode {episode_id} was not downloaded successfully, skipping")
+            return None
+        
+        # Load TFDS data
+        tfds_path = episode_dir / "tfds_data.json"
+        if not tfds_path.exists():
+            print(f"No TFDS data found for {episode_id}")
+            return None
+            
+        with open(tfds_path, 'r') as f:
+            tfds_data = json.load(f)
+        
+        steps_data = tfds_data.get("steps", [])
         if not steps_data:
-            print(f"No TFDS data available for {episode_id}")
-            print(f"Skipping trajectory generation - both TFDS and raw data required")
+            print(f"No steps data for {episode_id}")
             return None
         
-        tfds_data["steps"] = steps_data
-        tfds_data["language_instruction"] = steps_data[0]["language_instruction"] if steps_data else ""
-        
-        print(f"Processing episode {episode_id} with {len(steps_data)} steps")
-        
-        # Download raw trajectory
-        path_parts = file_path.replace("/trajectory.h5", "").split('/')
-        try:
-            base_index = path_parts.index("droid_raw")
-            if path_parts[base_index+1] != '1.0.1':
-                raise ValueError("Found 'droid_raw' but not '1.0.1' following it.")
-            episode_folder = "/".join(path_parts[base_index+2:])
-        except (ValueError, IndexError):
-            episode_folder = "/".join(path_parts[-4:])
-        
-        gs_path = f"gs://gresearch/robotics/droid_raw/1.0.1/{episode_folder}/"
-        local_path = Path(temp_dir) / episode_id
-        
-        # Download raw data
-        local_path.mkdir(parents=True, exist_ok=True)
-        try:
-            subprocess.run(
-                ["gsutil", "-m", "cp", "-r", gs_path, str(local_path)],
-                capture_output=True,
-                check=True
-            )
-            
-            # Find the actual downloaded directory
-            downloaded_dirs = list(local_path.iterdir())
-            if not downloaded_dirs:
-                raise Exception("No data downloaded")
-            scene_path = downloaded_dirs[0]
-            
-        except Exception as e:
-            print(f"Failed to download raw data for {episode_id}: {e}")
-            print(f"Skipping trajectory generation - both TFDS and raw data required")
+        # Find raw data directory
+        raw_data_dirs = list((episode_dir / "raw_data").glob("*"))
+        if not raw_data_dirs:
+            print(f"No raw data directory found for {episode_id}")
             return None
         
-        # Load metadata JSON
+        scene_path = raw_data_dirs[0]
+        
+        # Load metadata JSON from raw data
         metadata = None
         json_files = glob.glob(str(scene_path) + "/*.json")
         if json_files:
             with open(json_files[0], "r") as f:
                 metadata = json.load(f)
-            # Debug: Print metadata keys (commented out for production)
-            # print(f"Metadata keys for {episode_id}: {metadata}")  # Show first 10 keys
         
         # Get camera serials and create reverse mapping
         camera_serials = {}
@@ -233,23 +179,14 @@ def process_episode_combined(episode, episode_idx: int, output_dir: str, temp_di
                     serial_to_camera_name[str(serial)] = camera_name
             
             # Also check for alternative key formats
-            # Check for keys containing 'serial' or 'cam'
             for key, value in metadata.items():
                 if 'serial' in key.lower() and isinstance(value, (str, int)):
-                    # Try to match to camera names
                     for camera_name in CAMERA_NAMES:
                         if camera_name in key:
                             if camera_name not in camera_serials:
                                 camera_serials[camera_name] = str(value)
                                 serial_to_camera_name[str(value)] = camera_name
-                                # print(f"Found alternative serial key: {key} = {value} -> {camera_name}")
-                                pass
-        # print(serial_to_camera_name)
-        # Verify raw data exists
-        if not scene_path.exists():
-            print(f"Scene path does not exist for {episode_id}")
-            return None
-            
+        
         # Load trajectory H5 file
         h5_file = scene_path / "trajectory.h5"
         trajectory_data = {}
@@ -259,48 +196,29 @@ def process_episode_combined(episode, episode_idx: int, output_dir: str, temp_di
             print(f"No trajectory.h5 file found for {episode_id}")
             return None
             
-        if h5_file.exists():
-            with h5py.File(str(h5_file), "r") as f:
-                # Get trajectory length
-                if "action" in f:
-                    for key in f["action"].keys():
-                        if isinstance(f["action"][key], h5py.Dataset):
-                            traj_length = f["action"][key].shape[0]
-                            break
-                
-                # Extract all data from H5 file
-                def extract_h5_data(group, prefix=""):
-                    data = {}
-                    for key in group.keys():
-                        full_key = f"{prefix}/{key}" if prefix else key
-                        if isinstance(group[key], h5py.Group):
-                            data.update(extract_h5_data(group[key], full_key))
-                        elif isinstance(group[key], h5py.Dataset):
-                            # Store dataset reference for later extraction by timestep
-                            data[full_key] = group[key]
-                    return data
-                
-                # Extract and store all H5 data in memory before closing file
-                trajectory_data_refs = extract_h5_data(f)
-                
-                # Convert H5 dataset references to actual numpy arrays
-                trajectory_data = {}
-                for key, dataset in trajectory_data_refs.items():
-                    if isinstance(dataset, h5py.Dataset):
+        with h5py.File(str(h5_file), "r") as f:
+            # Get trajectory length
+            if "action" in f:
+                for key in f["action"].keys():
+                    if isinstance(f["action"][key], h5py.Dataset):
+                        traj_length = f["action"][key].shape[0]
+                        break
+            
+            # Extract all data from H5 file
+            def extract_h5_data(group, prefix=""):
+                data = {}
+                for key in group.keys():
+                    full_key = f"{prefix}/{key}" if prefix else key
+                    if isinstance(group[key], h5py.Group):
+                        data.update(extract_h5_data(group[key], full_key))
+                    elif isinstance(group[key], h5py.Dataset):
                         # Read entire dataset into memory
-                        trajectory_data[key] = np.array(dataset)
-                    else:
-                        trajectory_data[key] = dataset
+                        data[full_key] = np.array(group[key])
+                return data
+            
+            trajectory_data = extract_h5_data(f)
         
-        # Debug: Print camera serials mapping
-        if camera_serials:
-            print(f"Camera serials mapping for {episode_id}:")
-            for cam_name, serial in camera_serials.items():
-                print(f"  {cam_name}: {serial}")
-        # else:
-        #     print(f"No camera serials found in metadata for {episode_id}")
-        
-        # Find all unique camera serials in the H5 data
+        # Find all unique camera serials in the H5 data and infer mappings
         h5_camera_serials = set()
         for key in trajectory_data.keys():
             if "observation/camera_extrinsics/" in key:
@@ -312,52 +230,37 @@ def process_episode_combined(episode, episode_idx: int, output_dir: str, temp_di
                         if serial.isdigit():
                             h5_camera_serials.add(serial)
         
-        # Debug: Print H5 camera serials
+        # Infer camera mappings for unmapped serials
         if h5_camera_serials:
             unmapped_serials = h5_camera_serials - set(serial_to_camera_name.keys())
             if unmapped_serials:
-                # print(f"⚠️  Unmapped serials for {episode_id}: {unmapped_serials}")
-                
-                # Try to infer camera mappings for unmapped serials
-                # Based on common patterns in DROID dataset
                 unmapped_list = sorted(list(unmapped_serials))
                 missing_cameras = [cam for cam in CAMERA_NAMES if cam not in camera_serials]
                 
                 # If we have exactly 2 unmapped serials and 2 missing exterior cameras
                 if len(unmapped_list) == 2 and 'exterior_image_1' in missing_cameras and 'exterior_image_2' in missing_cameras:
-                    # Assign them in order (this is a heuristic)
                     serial_to_camera_name[unmapped_list[0]] = 'exterior_image_1'
                     serial_to_camera_name[unmapped_list[1]] = 'exterior_image_2'
                     camera_serials['exterior_image_1'] = unmapped_list[0]
                     camera_serials['exterior_image_2'] = unmapped_list[1]
-                    # print(f"  Inferred mapping: {unmapped_list[0]} -> exterior_image_1, {unmapped_list[1]} -> exterior_image_2}")
         
         # Rename camera extrinsics keys from serial numbers to camera names
         renamed_trajectory_data = {}
         for key, data in trajectory_data.items():
             new_key = key
-            # Check if this is a camera extrinsics key with serial number
             if "observation/camera_extrinsics/" in key:
-                # Extract the serial number part
                 parts = key.split('/')
                 for i, part in enumerate(parts):
                     if part == "camera_extrinsics" and i + 1 < len(parts):
-                        serial_side = parts[i + 1]  # e.g., "17368348_left"
-                        # Split serial and side
+                        serial_side = parts[i + 1]
                         serial_parts = serial_side.split('_')
                         if len(serial_parts) >= 1:
                             serial = serial_parts[0]
                             side_suffix = '_'.join(serial_parts[1:]) if len(serial_parts) > 1 else ''
-                            # Look up camera name
                             if serial in serial_to_camera_name:
                                 camera_name = serial_to_camera_name[serial]
-                                # Reconstruct the key with camera name
                                 parts[i + 1] = f"{camera_name}_{side_suffix}" if side_suffix else camera_name
                                 new_key = '/'.join(parts)
-                            else:
-                                # Keep the serial if we don't have a mapping
-                                # print(f"⚠️  No camera name mapping for serial {serial} in key {key}")
-                                pass
                         break
             renamed_trajectory_data[new_key] = data
         trajectory_data = renamed_trajectory_data
@@ -396,13 +299,13 @@ def process_episode_combined(episode, episode_idx: int, output_dir: str, temp_di
                         if len(frames) > 0:
                             camera_frames[f"{camera_name}_left"] = frames
         
-        # Verify we have valid trajectory data before creating file
+        # Verify we have valid trajectory data
         if traj_length == 0:
             print(f"Skipping {episode_id} - no trajectory data in H5 file")
             return None
         
-        # Create output RoboDM trajectory only after verifying both data sources
-        output_path = Path(output_dir) / f"{episode_id}.vla"
+        # Create output RoboDM trajectory
+        output_path = output_dir / f"{episode_id}.vla"
         traj = robodm.Trajectory(path=str(output_path), mode="w")
         
         # Process each timestep
@@ -413,22 +316,16 @@ def process_episode_combined(episode, episode_idx: int, output_dir: str, temp_di
                 # Flatten and add all TFDS data
                 flat_tfds = flatten_dict(step)
                 for key, value in flat_tfds.items():
-                    # Handle numpy arrays
-                    if isinstance(value, np.ndarray):
-                        # Keep as numpy array for robodm
-                        traj.add(f"tfds/{key}", value)
-                    elif isinstance(value, (list, tuple)):
-                        # Convert lists to numpy arrays
+                    # Convert lists back to numpy arrays
+                    if isinstance(value, list):
                         traj.add(f"tfds/{key}", np.array(value))
                     else:
-                        # Scalar values
                         traj.add(f"tfds/{key}", value)
             
             # Add raw trajectory data from H5
             for key, data in trajectory_data.items():
                 if isinstance(data, np.ndarray) and len(data.shape) > 0 and t < data.shape[0]:
                     value = data[t]
-                    # Keep numpy arrays as is for robodm
                     traj.add(f"raw/h5/{key}", value)
             
             # Add camera intrinsics and extrinsics
@@ -448,11 +345,10 @@ def process_episode_combined(episode, episode_idx: int, output_dir: str, temp_di
                 if metadata and camera_name in extrinsic_key_mapping:
                     metadata_key = extrinsic_key_mapping[camera_name]
                     if metadata_key in metadata:
-                        # Store the extrinsics from metadata
                         extrinsic_data = metadata[metadata_key]
                         traj.add(f"raw/camera_extrinsics/{camera_name}/left", np.array(extrinsic_data))
                 
-                # Also add any extrinsics from the H5 file (keys have been renamed to use camera names)
+                # Also add any extrinsics from the H5 file
                 for side in ["left", "right"]:
                     extrinsic_key = f"observation/camera_extrinsics/{camera_name}_{side}"
                     if extrinsic_key in trajectory_data:
@@ -460,6 +356,12 @@ def process_episode_combined(episode, episode_idx: int, output_dir: str, temp_di
                         if isinstance(data, np.ndarray) and len(data.shape) > 0 and t < data.shape[0]:
                             value = data[t]
                             traj.add(f"raw/camera_extrinsics/{camera_name}/{side}", value)
+                
+                # Add camera intrinsics if available
+                if serial in camera_intrinsics:
+                    intrinsic_data = camera_intrinsics[serial]
+                    intrinsic_matrix = np.array(intrinsic_data['intrinsic_matrix'])
+                    traj.add(f"raw/camera_intrinsics/{camera_name}", intrinsic_matrix)
             
             # Add image data
             for cam_key, frames in camera_frames.items():
@@ -467,132 +369,122 @@ def process_episode_combined(episode, episode_idx: int, output_dir: str, temp_di
                     traj.add(f"raw/images/{cam_key}", frames[t])
         
         # Determine task success from path
+        gs_path = download_metadata.get("gs_path", "")
         task_successful = 'success' in gs_path.lower()
         
         # Add metadata
         metadata_dict = {
             "episode_id": episode_id,
-            "language_instruction": tfds_data["language_instruction"],
+            "language_instruction": tfds_data.get("language_instruction", ""),
             "trajectory_length": traj_length,
             "task_successful": task_successful,
             "gsutil_path": gs_path,
             "camera_serials": camera_serials,
-            "tfds_file_path": file_path
+            "tfds_file_path": download_metadata.get("tfds_file_path", "")
         }
         
-        # Store metadata as a string (not numpy array)
+        # Store metadata as a string
         metadata_str = json.dumps(metadata_dict)
-        # Store as a single-element string array to maintain compatibility
         traj.add("metadata", metadata_str)
         
         # Close trajectory
         traj.close()
-        
-        # Clean up downloaded files
-        import shutil
-        if scene_path.exists():
-            shutil.rmtree(scene_path)
         
         print(f"Successfully processed {episode_id} -> {output_path}")
         return str(output_path)
         
     except Exception as e:
         import traceback
-        print(f"Error processing episode {episode_idx}: {e}")
+        print(f"Error processing episode {episode_id}: {e}")
         traceback.print_exc()
         return None
 
 
-def ingest_droid_combined(
+def ingest_droid_from_downloads(
+    download_dir: str = "./droid_downloaded_data",
     output_dir: str = "./droid_combined_data",
-    num_episodes: int = 10,
     num_workers: int = 64
 ):
     """
-    Ingest DROID dataset combining TFDS and raw trajectory data.
+    Ingest DROID dataset from downloaded data.
     
     Args:
-        output_dir: Directory to save combined trajectories
-        num_episodes: Number of episodes to process
+        download_dir: Directory containing downloaded data
+        output_dir: Directory to save RoboDM trajectories
         num_workers: Number of parallel workers
     """
     # Initialize Ray if needed
     if not ray.is_initialized():
         ray.init()
     
-    # Load HuggingFace camera extrinsics
-    print("Loading HuggingFace camera extrinsics...")
-    hf_extrinsics = load_hf_camera_extrinsics()
-    
-    # Create directories
+    # Create output directory
+    download_dir = Path(download_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    temp_dir = tempfile.mkdtemp(prefix="droid_combined_")
     
-    try:
-        # Load TFDS dataset
-        print("Loading DROID dataset from TFDS...")
-        # ds = tfds.load("droid", data_dir="gs://gresearch/robotics", split="train")
-        ds = tfds.load("droid_100", data_dir=".", split="train")
+    # Load HuggingFace camera extrinsics
+    print("Loading HuggingFace camera extrinsics...")
+    hf_cache_dir = download_dir / "huggingface_cache"
+    hf_extrinsics = load_hf_camera_extrinsics(hf_cache_dir)
+    
+    # Load camera intrinsics
+    print("Loading camera intrinsics...")
+    camera_intrinsics = load_camera_intrinsics(download_dir)
+    if camera_intrinsics:
+        print(f"Loaded intrinsics for {len(camera_intrinsics)} camera serials")
+    
+    # Find all episode directories
+    episode_dirs = [d for d in download_dir.iterdir() 
+                    if d.is_dir() and d.name != "huggingface_cache"]
+    
+    print(f"Found {len(episode_dirs)} episode directories to process")
+    
+    # Process episodes in parallel
+    futures = []
+    for episode_dir in episode_dirs:
+        future = process_episode.remote(episode_dir, output_dir, hf_extrinsics, camera_intrinsics)
+        futures.append(future)
         
-        # Process episodes in parallel
-        futures = []
-        for i, episode in enumerate(ds.take(num_episodes)):
-            # Extract data from TensorFlow dataset to make it serializable
-            episode_data = {
-                "episode_metadata": {
-                    "file_path": episode["episode_metadata"]["file_path"].numpy().decode("utf-8")
-                },
-                "steps": list(episode["steps"].as_numpy_iterator())
-            }
-            
-            future = process_episode_combined.remote(
-                episode_data, i, str(output_dir), temp_dir, hf_extrinsics
-            )
-            futures.append(future)
-            
-            # Limit concurrent tasks
-            if len(futures) >= num_workers:
-                ready, futures = ray.wait(futures, num_returns=1)
-                for f in ready:
-                    result = ray.get(f)
-                    if result:
-                        print(f"Completed: {result}")
-        
-        # Wait for remaining tasks
-        results = ray.get(futures)
-        successful = [r for r in results if r is not None]
-        
-        print(f"\nProcessing complete!")
-        print(f"Successfully processed {len(successful)} out of {num_episodes} episodes")
-        print(f"Output directory: {output_dir}")
-        
-        # Create a RoboDM dataset from the saved trajectories
-        from robodm.dataset import VLADataset
-        dataset = VLADataset(str(output_dir / "*.vla"))
-        
-        return dataset
-        
-    finally:
-        # Clean up temp directory
-        import shutil
-        if Path(temp_dir).exists():
-            shutil.rmtree(temp_dir)
+        # Limit concurrent tasks
+        if len(futures) >= num_workers:
+            ready, futures = ray.wait(futures, num_returns=1)
+            for f in ready:
+                result = ray.get(f)
+                if result:
+                    print(f"Completed: {result}")
+    
+    # Wait for remaining tasks
+    results = ray.get(futures)
+    successful = [r for r in results if r is not None]
+    
+    print(f"\nIngestion complete!")
+    print(f"Successfully processed {len(successful)} out of {len(episode_dirs)} episodes")
+    print(f"Output directory: {output_dir}")
+    
+    # Create a RoboDM dataset from the saved trajectories
+    from robodm.dataset import VLADataset
+    dataset = VLADataset(str(output_dir / "*.vla"))
+    
+    return dataset
 
 
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", default="./droid_combined_data")
-    parser.add_argument("--num_episodes", type=int, default=10)
+    parser.add_argument("--download_dir", default="./droid_downloaded_data",
+                        help="Directory containing downloaded data")
+    parser.add_argument("--output_dir", default="./droid_combined_data",
+                        help="Directory to save RoboDM trajectories")
+    parser.add_argument("--num_workers", type=int, default=64,
+                        help="Number of parallel workers")
     
     args = parser.parse_args()
     
-
-    # Just run the ingestion
-    dataset = ingest_droid_combined(
+    dataset = ingest_droid_from_downloads(
+        download_dir=args.download_dir,
         output_dir=args.output_dir,
-        num_episodes=args.num_episodes
+        num_workers=args.num_workers
     )
+    
     print(f"\nCreated dataset with {dataset.count()} trajectories")
