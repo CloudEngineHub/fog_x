@@ -14,7 +14,6 @@ import ray
 import json
 import numpy as np
 import h5py
-import cv2
 import glob
 import requests
 
@@ -127,7 +126,7 @@ def split_stereo_frames(stereo_frames: np.ndarray):
     return left_frames, right_frames
 
 
-@ray.remote
+@ray.remote(num_gpus = 0.1)
 def process_episode_combined(episode, episode_idx: int, output_dir: str, temp_dir: str, hf_extrinsics: Dict):
     """
     Process a single TFDS episode by:

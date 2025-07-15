@@ -1,10 +1,10 @@
 """
-Benchmark for camera calibration evaluation using VLM on DROID dataset.
+Benchmark for ground truth camera calibration analysis on DROID dataset.
 
-This script evaluates VLM's ability to correct camera calibration errors by:
-1. Using HuggingFace calibration as ground truth (with fallback to other extrinsics)
-2. Introducing synthetic calibration errors at a fixed rate
-3. Asking VLM to identify and suggest corrections for calibration errors
+This script analyzes and visualizes ground truth camera calibrations by:
+1. Loading calibration data from HuggingFace format (with fallback to other formats)
+2. Visualizing end effector trajectories projected using the calibration
+3. Verifying that intrinsic and extrinsic matrices are used correctly
 """
 
 import os
@@ -18,7 +18,6 @@ import ray
 from functools import partial
 
 from robodm.dataset import VLADataset, DatasetConfig
-from robodm.agent.vlm_service import get_vlm_service
 
 
 def load_ground_truth_calibration(trajectory: Dict[str, Any]) -> Dict[str, Any]:
@@ -32,13 +31,15 @@ def load_ground_truth_calibration(trajectory: Dict[str, Any]) -> Dict[str, Any]:
         - intrinsics: Camera intrinsics if available
         - camera_serials: Camera serial numbers
         - calibration_source: Source of calibration ("hf" or "raw")
+        - language_instruction: Task instruction if available
     """
     calibration_data = {
         "ground_truth_extrinsics": {},
         "intrinsics": {},
         "camera_serials": {},
         "serial_to_camera": {},
-        "calibration_source": {}
+        "calibration_source": {},
+        "language_instruction": ""
     }
     
     # Debug: Print available extrinsic keys
@@ -49,6 +50,36 @@ def load_ground_truth_calibration(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     # Camera names to check
     camera_names = ["wrist", "exterior_image_1", "exterior_image_2"]
     
+    # Extract language instruction from various possible locations
+    # Try TFDS format first
+    if "tfds/steps/language_instruction" in trajectory:
+        lang_data = trajectory["tfds/steps/language_instruction"]
+        if isinstance(lang_data, (list, np.ndarray)) and len(lang_data) > 0:
+            # Take the first instruction
+            instruction = lang_data[0]
+            if isinstance(instruction, bytes):
+                calibration_data["language_instruction"] = instruction.decode("utf-8")
+            else:
+                calibration_data["language_instruction"] = str(instruction)
+    # Try alternative TFDS format
+    elif "tfds/observation/language_instruction" in trajectory:
+        lang_data = trajectory["tfds/observation/language_instruction"]
+        if isinstance(lang_data, (list, np.ndarray)) and len(lang_data) > 0:
+            instruction = lang_data[0]
+            if isinstance(instruction, bytes):
+                calibration_data["language_instruction"] = instruction.decode("utf-8")
+            else:
+                calibration_data["language_instruction"] = str(instruction)
+    # Try raw format
+    elif "raw/h5/observation/language_instruction" in trajectory:
+        lang_data = trajectory["raw/h5/observation/language_instruction"]
+        if isinstance(lang_data, (list, np.ndarray)) and len(lang_data) > 0:
+            instruction = lang_data[0]
+            if isinstance(instruction, bytes):
+                calibration_data["language_instruction"] = instruction.decode("utf-8")
+            else:
+                calibration_data["language_instruction"] = str(instruction)
+    
     # Extract metadata
     metadata_str = trajectory.get("metadata", "")
     if isinstance(metadata_str, (list, np.ndarray)):
@@ -57,6 +88,9 @@ def load_ground_truth_calibration(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     try:
         metadata = json.loads(metadata_str) if metadata_str else {}
         calibration_data["camera_serials"] = metadata.get("camera_serials", {})
+        # Also check metadata for language instruction as fallback
+        if not calibration_data["language_instruction"] and "language_instruction" in metadata:
+            calibration_data["language_instruction"] = metadata["language_instruction"]
     except:
         metadata = {}
     
@@ -251,64 +285,39 @@ def load_ground_truth_calibration(trajectory: Dict[str, Any]) -> Dict[str, Any]:
         print(f"⚠️  Found calibration for: {list(calibration_data['ground_truth_extrinsics'].keys())}")
     
     # Get intrinsics if available
+    intrinsic_keys = [k for k in trajectory.keys() if 'camera_intrinsics' in k]
+    if intrinsic_keys:
+        print(f"Available intrinsic keys: {sorted(intrinsic_keys)[:10]}...")
+    
     for camera_name in camera_names:
         intrinsic_key = f"raw/camera_intrinsics/{camera_name}"
         if intrinsic_key in trajectory:
             intrinsic_data = trajectory[intrinsic_key]
             if isinstance(intrinsic_data, (list, np.ndarray)) and len(intrinsic_data) > 0:
-                calibration_data["intrinsics"][camera_name] = np.array(intrinsic_data[0]) if hasattr(intrinsic_data[0], '__len__') else np.array(intrinsic_data)
+                # Handle both single matrix and array of matrices
+                if isinstance(intrinsic_data, np.ndarray):
+                    if intrinsic_data.ndim == 3 and intrinsic_data.shape[0] > 0:
+                        # Array of matrices, take first one
+                        intrinsic_matrix = intrinsic_data[0]
+                    elif intrinsic_data.ndim == 2 and intrinsic_data.shape == (3, 3):
+                        # Single matrix
+                        intrinsic_matrix = intrinsic_data
+                    else:
+                        # Flatten and reshape if needed
+                        intrinsic_matrix = np.array(intrinsic_data).reshape(3, 3)
+                else:
+                    intrinsic_matrix = np.array(intrinsic_data[0]) if hasattr(intrinsic_data[0], '__len__') else np.array(intrinsic_data)
+                
+                # Ensure it's 3x3
+                if intrinsic_matrix.shape != (3, 3):
+                    intrinsic_matrix = intrinsic_matrix.reshape(3, 3)
+                
+                calibration_data["intrinsics"][camera_name] = intrinsic_matrix
+                print(f"  Loaded intrinsics for {camera_name}, shape: {intrinsic_matrix.shape}")
     
     return calibration_data
 
 
-def corrupt_calibration(extrinsic: np.ndarray, corruption_type: str = "rotation_translation") -> Tuple[np.ndarray, Dict[str, Any]]:
-    """
-    Introduce synthetic calibration errors to an extrinsic matrix.
-    
-    Args:
-        extrinsic: 4x4 camera extrinsic matrix
-        corruption_type: Type of corruption ("rotation", "translation", "rotation_translation")
-        
-    Returns:
-        Tuple of (corrupted_extrinsic, corruption_params)
-    """
-    if extrinsic.shape != (4, 4):
-        return extrinsic, {"error": "Invalid extrinsic shape"}
-    
-    corrupted = extrinsic.copy()
-    corruption_params = {"type": corruption_type}
-    
-    if corruption_type in ["rotation", "rotation_translation"]:
-        # Add rotation error (5-15 degrees around random axis)
-        angle = np.random.uniform(5, 15)  # degrees
-        axis = np.random.randn(3)
-        axis = axis / np.linalg.norm(axis)
-        
-        # Rodrigues' rotation formula
-        angle_rad = np.radians(angle)
-        K = np.array([[0, -axis[2], axis[1]],
-                      [axis[2], 0, -axis[0]],
-                      [-axis[1], axis[0], 0]])
-        R_error = np.eye(3) + np.sin(angle_rad) * K + (1 - np.cos(angle_rad)) * K @ K
-        
-        # Apply rotation error
-        corrupted[:3, :3] = R_error @ extrinsic[:3, :3]
-        corruption_params["rotation_angle"] = angle
-        corruption_params["rotation_axis"] = axis.tolist()
-    
-    if corruption_type in ["translation", "rotation_translation"]:
-        # Add translation error (0.05-0.15 meters in random direction)
-        magnitude = np.random.uniform(0.05, 0.15)
-        direction = np.random.randn(3)
-        direction = direction / np.linalg.norm(direction)
-        translation_error = magnitude * direction
-        
-        # Apply translation error
-        corrupted[:3, 3] = extrinsic[:3, 3] + translation_error
-        corruption_params["translation_magnitude"] = magnitude
-        corruption_params["translation_direction"] = direction.tolist()
-    
-    return corrupted, corruption_params
 
 
 def project_point_to_image(point_3d: np.ndarray, extrinsic: np.ndarray, intrinsic: np.ndarray) -> Tuple[int, int]:
@@ -317,7 +326,7 @@ def project_point_to_image(point_3d: np.ndarray, extrinsic: np.ndarray, intrinsi
     
     Args:
         point_3d: 3D point in world coordinates [x, y, z]
-        extrinsic: 4x4 camera extrinsic matrix
+        extrinsic: 4x4 camera extrinsic matrix (transforms from world to camera coordinates)
         intrinsic: 3x3 camera intrinsic matrix
         
     Returns:
@@ -330,12 +339,22 @@ def project_point_to_image(point_3d: np.ndarray, extrinsic: np.ndarray, intrinsi
     if extrinsic.shape != (4, 4):
         print(f"ERROR: extrinsic has shape {extrinsic.shape}, expected (4, 4)")
         return -1, -1
+    if intrinsic.shape != (3, 3):
+        print(f"ERROR: intrinsic has shape {intrinsic.shape}, expected (3, 3)")
+        return -1, -1
     
     # Convert to homogeneous coordinates
     point_3d_homo = np.append(point_3d, 1)
     
-    # Transform to camera coordinates
-    point_cam = extrinsic @ point_3d_homo
+    # Transform from world to camera coordinates using the inverse of extrinsic
+    # The extrinsic matrix typically represents camera pose in world coordinates
+    # To transform points from world to camera, we need the inverse
+    try:
+        extrinsic_inv = np.linalg.inv(extrinsic)
+        point_cam = extrinsic_inv @ point_3d_homo
+    except:
+        # If inverse fails, assume extrinsic is already world-to-camera transform
+        point_cam = extrinsic @ point_3d_homo
     
     # Project to image plane
     if point_cam[2] > 0:  # Point is in front of camera
@@ -346,29 +365,31 @@ def project_point_to_image(point_3d: np.ndarray, extrinsic: np.ndarray, intrinsi
         return -1, -1  # Point behind camera
 
 
-def visualize_calibration_comparison(
+def visualize_ground_truth_calibration(
     trajectory: Dict[str, Any],
     ground_truth_extrinsic: np.ndarray,
-    corrupted_extrinsic: np.ndarray,
     camera_name: str,
     intrinsic: Optional[np.ndarray] = None,
-    output_path: Optional[Path] = None
+    output_path: Optional[Path] = None,
+    language_instruction: str = ""
 ) -> np.ndarray:
     """
-    Visualize end effector trajectory using both ground truth and corrupted calibration.
+    Visualize end effector trajectory using ground truth calibration.
     
     Returns:
-        Visualization image showing both calibrations side by side
+        Visualization image showing the ground truth calibration
     """
     if intrinsic is None:
         print(f"Warning: No intrinsic matrix found for {camera_name}, using default")
-        # Create a default intrinsic matrix based on typical image size
-        # Assuming 640x480 image with focal length ~500
+        # Create a default intrinsic matrix based on ZED camera typical parameters
+        # This matches the default intrinsics from the DROID dataset
         intrinsic = np.array([
                 [733.37261963,   0.,         625.26251221],
                 [  0.,         733.37261963,  361.92279053],
                 [  0.,           0.,           1.,        ]
             ])
+    else:
+        print(f"  Using stored intrinsics for {camera_name}, shape: {intrinsic.shape}")
         
     # Get camera images
     image_key = f"raw/images/{camera_name}_left"
@@ -408,130 +429,127 @@ def visualize_calibration_comparison(
         print(f"Warning: Empty end effector position data for {camera_name}")
         return None
     
-    # Select a frame from the middle of the trajectory
-    frame_idx = len(images) // 2
-    base_frame = images[frame_idx].copy()
+    # Select multiple frames throughout the trajectory to show the trajectory
+    num_frames = min(10, len(images))  # Show up to 10 points along trajectory
+    frame_indices = np.linspace(0, len(images) - 1, num_frames, dtype=int)
     
-    # Create two copies for visualization
-    gt_frame = base_frame.copy()
-    corrupted_frame = base_frame.copy()
+    # Use the middle frame as the base image
+    base_frame_idx = len(images) // 2
+    visualization_frame = images[base_frame_idx].copy()
     
-    # Validate extrinsic matrices
+    # Validate extrinsic matrix
     if ground_truth_extrinsic.shape != (4, 4):
         print(f"ERROR: ground_truth_extrinsic has shape {ground_truth_extrinsic.shape}, expected (4, 4)")
         return None
-    if corrupted_extrinsic.shape != (4, 4):
-        print(f"ERROR: corrupted_extrinsic has shape {corrupted_extrinsic.shape}, expected (4, 4)")
-        return None
     
-    # Draw only the current frame's end effector position
-    if frame_idx < len(ee_positions):
-        ee_pos_raw = ee_positions[frame_idx]
-        
-        # Handle different position formats
-        if isinstance(ee_pos_raw, (list, np.ndarray)):
-            if len(ee_pos_raw) >= 7:
-                # 7-element format: [x, y, z, qx, qy, qz, qw]
-                ee_pos = ee_pos_raw[:3]
-            elif len(ee_pos_raw) == 6:
-                # 6-element format: [x, y, z, roll, pitch, yaw]
-                ee_pos = ee_pos_raw[:3]
-            elif len(ee_pos_raw) == 3:
-                # Already just position
-                ee_pos = ee_pos_raw
+    # Draw the end effector trajectory across multiple frames
+    trajectory_points = []
+    for frame_idx in frame_indices:
+        if frame_idx < len(ee_positions):
+            ee_pos_raw = ee_positions[frame_idx]
+            
+            # Handle different position formats
+            if isinstance(ee_pos_raw, (list, np.ndarray)):
+                if len(ee_pos_raw) >= 7:
+                    # 7-element format: [x, y, z, qx, qy, qz, qw]
+                    ee_pos = ee_pos_raw[:3]
+                elif len(ee_pos_raw) == 6:
+                    # 6-element format: [x, y, z, roll, pitch, yaw]
+                    ee_pos = ee_pos_raw[:3]
+                elif len(ee_pos_raw) == 3:
+                    # Already just position
+                    ee_pos = ee_pos_raw
+                else:
+                    print(f"Warning: Unexpected ee_pos shape: {len(ee_pos_raw)}")
+                    continue
             else:
-                print(f"Warning: Unexpected ee_pos shape: {len(ee_pos_raw)}")
-                return None
-        else:
-            print(f"Warning: Unexpected ee_pos type: {type(ee_pos_raw)}")
-            return None
-        
-        # Ensure ee_pos is a numpy array with 3 elements
-        ee_pos = np.array(ee_pos)[:3]
-        
-        # Project using ground truth calibration
-        gt_px, gt_py = project_point_to_image(ee_pos, ground_truth_extrinsic, intrinsic)
-        if gt_px >= 0 and gt_py >= 0 and gt_px < gt_frame.shape[1] and gt_py < gt_frame.shape[0]:
-            # Draw a larger circle for better visibility
-            cv2.circle(gt_frame, (gt_px, gt_py), 8, (0, 255, 0), -1)  # Green filled circle
-            cv2.circle(gt_frame, (gt_px, gt_py), 10, (0, 255, 0), 2)  # Green outline
-        
-        # Project using corrupted calibration
-        corr_px, corr_py = project_point_to_image(ee_pos, corrupted_extrinsic, intrinsic)
-        if corr_px >= 0 and corr_py >= 0 and corr_px < corrupted_frame.shape[1] and corr_py < corrupted_frame.shape[0]:
-            # Draw a larger circle for better visibility
-            cv2.circle(corrupted_frame, (corr_px, corr_py), 8, (255, 0, 0), -1)  # Red filled circle
-            cv2.circle(corrupted_frame, (corr_px, corr_py), 10, (255, 0, 0), 2)  # Red outline
+                print(f"Warning: Unexpected ee_pos type: {type(ee_pos_raw)}")
+                continue
+            
+            # Ensure ee_pos is a numpy array with 3 elements
+            ee_pos = np.array(ee_pos)[:3]
+            
+            # Project using ground truth calibration
+            px, py = project_point_to_image(ee_pos, ground_truth_extrinsic, intrinsic)
+            if px >= 0 and py >= 0 and px < visualization_frame.shape[1] and py < visualization_frame.shape[0]:
+                trajectory_points.append((px, py))
+                # Draw circle for each point
+                cv2.circle(visualization_frame, (px, py), 5, (0, 255, 0), -1)  # Green filled circle
+    
+    # Draw lines connecting the trajectory points
+    if len(trajectory_points) > 1:
+        for i in range(len(trajectory_points) - 1):
+            cv2.line(visualization_frame, trajectory_points[i], trajectory_points[i+1], (0, 255, 0), 2)
     
     # Add labels
-    cv2.putText(gt_frame, "Ground Truth (Green)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-    cv2.putText(corrupted_frame, "Corrupted (Red)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+    cv2.putText(visualization_frame, f"Ground Truth Calibration - {camera_name}", (10, 30), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    cv2.putText(visualization_frame, f"End Effector Trajectory (Green)", (10, 60), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     
-    # Combine frames side by side
-    combined = np.hstack([gt_frame, corrupted_frame])
+    # Add language instruction if available
+    if language_instruction:
+        # Wrap long text
+        max_width = 60  # characters per line
+        words = language_instruction.split()
+        lines = []
+        current_line = []
+        current_length = 0
+        
+        for word in words:
+            if current_length + len(word) + 1 > max_width:
+                lines.append(" ".join(current_line))
+                current_line = [word]
+                current_length = len(word)
+            else:
+                current_line.append(word)
+                current_length += len(word) + 1
+        
+        if current_line:
+            lines.append(" ".join(current_line))
+        
+        # Draw task instruction
+        y_offset = 90
+        cv2.putText(visualization_frame, "Task:", (10, y_offset), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        for i, line in enumerate(lines[:3]):  # Limit to 3 lines
+            cv2.putText(visualization_frame, line, (10, y_offset + 25 * (i + 1)), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
     if output_path:
-        cv2.imwrite(str(output_path), cv2.cvtColor(combined, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(output_path), cv2.cvtColor(visualization_frame, cv2.COLOR_RGB2BGR))
     
-    return combined
+    return visualization_frame
 
 
-def compute_transformation_difference(T1: np.ndarray, T2: np.ndarray) -> Dict[str, Any]:
-    """
-    Compute the transformation difference between two 4x4 matrices.
-    Returns the transformation that would correct T2 to match T1.
-    """
-    if T1.shape != (4, 4) or T2.shape != (4, 4):
-        return {"error": "Invalid transformation shape"}
-    
-    # Compute T_correction such that T1 = T_correction @ T2
-    T_correction = T1 @ np.linalg.inv(T2)
-    
-    # Extract rotation and translation
-    R_correction = T_correction[:3, :3]
-    t_correction = T_correction[:3, 3]
-    
-    # Convert rotation to axis-angle
-    trace = np.trace(R_correction)
-    angle = np.arccos(np.clip((trace - 1) / 2, -1, 1))
-    
-    if np.abs(angle) < 1e-6:
-        axis = np.array([0, 0, 1])  # Arbitrary axis for zero rotation
-    else:
-        axis = np.array([
-            R_correction[2, 1] - R_correction[1, 2],
-            R_correction[0, 2] - R_correction[2, 0],
-            R_correction[1, 0] - R_correction[0, 1]
-        ])
-        axis = axis / (2 * np.sin(angle))
-    
-    return {
-        "rotation_angle_deg": np.degrees(angle),
-        "rotation_axis": axis.tolist(),
-        "translation": t_correction.tolist(),
-        "correction_matrix": T_correction.tolist()
-    }
 
 
-def process_single_trajectory_with_corruption(
+def process_single_trajectory(
     trajectory: Dict[str, Any], 
-    output_dir: Path,
-    corruption_rate: float = 0.5
+    output_dir: Path
 ) -> Dict[str, Any]:
     """
-    Process a single trajectory with synthetic calibration corruption.
+    Process a single trajectory and visualize ground truth calibration.
     """
     file_path = trajectory.get("__file_path__", "")
     traj_name = Path(file_path).stem
     
-    print(f"\n📐 Processing {traj_name} with corruption rate {corruption_rate}")
+    print(f"\n📐 Processing {traj_name}")
     
     # Load ground truth calibration
     calibration_data = load_ground_truth_calibration(trajectory)
     
+    # Display language instruction if available
+    if calibration_data.get("language_instruction"):
+        print(f"  Task: {calibration_data['language_instruction']}")
+    else:
+        print(f"  Task: No language instruction found")
+    
     # Results for this trajectory
     results = {
         "trajectory_name": traj_name,
+        "language_instruction": calibration_data.get("language_instruction", ""),
         "camera_evaluations": {},
         "has_calibration": len(calibration_data["ground_truth_extrinsics"]) > 0
     }
@@ -540,18 +558,12 @@ def process_single_trajectory_with_corruption(
         print(f"⚠️  No calibration data found for {traj_name}")
         return results
     
-    # Process only side cameras (no wrist)
-    for camera_name in ["exterior_image_1", "exterior_image_2"]:
-        if camera_name not in calibration_data["ground_truth_extrinsics"]:
-            continue
-        
+    # Process all cameras
+    for camera_name in calibration_data["ground_truth_extrinsics"].keys():
         camera_results = {
             "has_calibration": True,
             "calibration_source": calibration_data["calibration_source"].get(camera_name, "unknown"),
-            "was_corrupted": False,
-            "corruption_params": None,
-            "vlm_evaluation": None,
-            "ground_truth_correction": None
+            "camera_serial": calibration_data["camera_serials"].get(camera_name, "unknown")
         }
         
         # Get ground truth calibration
@@ -564,133 +576,55 @@ def process_single_trajectory_with_corruption(
             
         intrinsic = calibration_data["intrinsics"].get(camera_name)
         
-        # Decide whether to corrupt this camera's calibration
-        if np.random.random() < corruption_rate:
-            camera_results["was_corrupted"] = True
-            
-            # Create corrupted calibration
-            corrupted_extrinsic, corruption_params = corrupt_calibration(gt_extrinsic)
-            camera_results["corruption_params"] = corruption_params
-            
-            # Compute ground truth correction
-            camera_results["ground_truth_correction"] = compute_transformation_difference(
-                gt_extrinsic, corrupted_extrinsic
-            )
-            
-            # Generate visualization
-            vis_path = output_dir / f"{traj_name}_{camera_name}_calibration_comparison.jpg"
-            vis_image = visualize_calibration_comparison(
-                trajectory, gt_extrinsic, corrupted_extrinsic, 
-                camera_name, intrinsic, vis_path
-            )
-            
-            # Use VLM to evaluate and suggest correction
-            if vis_image is not None:
-                try:
-                    vlm_service = get_vlm_service()
-                    vlm_service.initialize()
-                    
-                    vlm_prompt = """You are analyzing robot camera calibration. The image shows:
-- Left: Robot end effector trajectory with CORRECT calibration (green dots/lines)
-- Right: Same trajectory with INCORRECT calibration (red dots/lines)
-
-The incorrect calibration has rotation and/or translation errors.
-
-Please analyze the calibration error and provide the transformation needed to correct it:
-
-1. ROTATION_ERROR: Estimate the rotation error in degrees and the axis of rotation
-2. TRANSLATION_ERROR: Estimate the translation error in meters and direction
-3. CONFIDENCE: Your confidence in the estimates (HIGH/MEDIUM/LOW)
-
-Format your response as:
-ROTATION_ANGLE: [degrees]
-ROTATION_AXIS: [x, y, z] (normalized)
-TRANSLATION_MAGNITUDE: [meters]
-TRANSLATION_DIRECTION: [x, y, z] (normalized)
-CONFIDENCE: [HIGH/MEDIUM/LOW]
-EXPLANATION: [Brief explanation of what you observe]"""
-                    
-                    vlm_response = vlm_service.analyze_image(vis_image, vlm_prompt)
-                    
-                    # Parse VLM response
-                    vlm_eval = {
-                        "raw_response": vlm_response,
-                        "rotation_angle": None,
-                        "rotation_axis": None,
-                        "translation_magnitude": None,
-                        "translation_direction": None,
-                        "confidence": "UNKNOWN",
-                        "explanation": ""
-                    }
-                    
-                    lines = vlm_response.strip().split('\n')
-                    for line in lines:
-                        if "ROTATION_ANGLE:" in line:
-                            try:
-                                vlm_eval["rotation_angle"] = float(line.split(":")[-1].strip())
-                            except:
-                                pass
-                        elif "ROTATION_AXIS:" in line:
-                            try:
-                                axis_str = line.split(":")[-1].strip()
-                                axis = eval(axis_str)  # Parse list
-                                vlm_eval["rotation_axis"] = axis
-                            except:
-                                pass
-                        elif "TRANSLATION_MAGNITUDE:" in line:
-                            try:
-                                vlm_eval["translation_magnitude"] = float(line.split(":")[-1].strip())
-                            except:
-                                pass
-                        elif "TRANSLATION_DIRECTION:" in line:
-                            try:
-                                dir_str = line.split(":")[-1].strip()
-                                direction = eval(dir_str)  # Parse list
-                                vlm_eval["translation_direction"] = direction
-                            except:
-                                pass
-                        elif "CONFIDENCE:" in line:
-                            vlm_eval["confidence"] = line.split(":")[-1].strip()
-                        elif "EXPLANATION:" in line:
-                            vlm_eval["explanation"] = line.split(":", 1)[-1].strip()
-                    
-                    camera_results["vlm_evaluation"] = vlm_eval
-                    
-                    # Calculate VLM accuracy
-                    if vlm_eval["rotation_angle"] is not None and camera_results["ground_truth_correction"]:
-                        gt_angle = camera_results["ground_truth_correction"]["rotation_angle_deg"]
-                        vlm_angle = vlm_eval["rotation_angle"]
-                        angle_error = abs(gt_angle - vlm_angle)
-                        camera_results["vlm_rotation_error"] = angle_error
-                    
-                    if vlm_eval["translation_magnitude"] is not None and camera_results["corruption_params"]:
-                        gt_magnitude = camera_results["corruption_params"].get("translation_magnitude", 0)
-                        vlm_magnitude = vlm_eval["translation_magnitude"]
-                        magnitude_error = abs(gt_magnitude - vlm_magnitude)
-                        camera_results["vlm_translation_error"] = magnitude_error
-                    
-                except Exception as e:
-                    print(f"VLM evaluation failed for {camera_name}: {e}")
-                    camera_results["vlm_evaluation"] = {"error": str(e)}
+        # Print calibration info
+        print(f"\n  Camera: {camera_name}")
+        print(f"  Calibration source: {camera_results['calibration_source']}")
+        print(f"  Camera serial: {camera_results['camera_serial']}")
+        print(f"  Has intrinsics: {'Yes' if intrinsic is not None else 'No'}")
+        
+        # Print extrinsic matrix
+        print(f"  Extrinsic matrix:")
+        print(f"    Rotation:")
+        for i in range(3):
+            print(f"      [{gt_extrinsic[i, 0]:7.4f}, {gt_extrinsic[i, 1]:7.4f}, {gt_extrinsic[i, 2]:7.4f}]")
+        print(f"    Translation: [{gt_extrinsic[0, 3]:7.4f}, {gt_extrinsic[1, 3]:7.4f}, {gt_extrinsic[2, 3]:7.4f}]")
+        
+        if intrinsic is not None:
+            print(f"  Intrinsic matrix:")
+            print(f"    fx: {intrinsic[0, 0]:.2f}, fy: {intrinsic[1, 1]:.2f}")
+            print(f"    cx: {intrinsic[0, 2]:.2f}, cy: {intrinsic[1, 2]:.2f}")
+        
+        # Generate visualization
+        vis_path = output_dir / f"{traj_name}_{camera_name}_calibration.jpg"
+        vis_image = visualize_ground_truth_calibration(
+            trajectory, gt_extrinsic, camera_name, intrinsic, vis_path,
+            language_instruction=calibration_data.get("language_instruction", "")
+        )
+        
+        if vis_image is not None:
+            camera_results["visualization_saved"] = True
+            print(f"  Visualization saved to: {vis_path}")
+        else:
+            camera_results["visualization_saved"] = False
+            print(f"  WARNING: Could not generate visualization")
         
         results["camera_evaluations"][camera_name] = camera_results
     
     # Save detailed results
-    results_file = output_dir / f"{traj_name}_calibration_corruption_results.json"
+    results_file = output_dir / f"{traj_name}_calibration_results.json"
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2, default=str)
     
     return results
 
 
-class CalibrationCorrectionBenchmark:
-    """Benchmark for evaluating VLM's ability to correct calibration errors."""
+class CalibrationVisualizationBenchmark:
+    """Benchmark for visualizing and analyzing ground truth camera calibrations."""
     
-    def __init__(self, dataset_path: str, output_dir: str = "./calibration_benchmark_results", corruption_rate: float = 0.5):
+    def __init__(self, dataset_path: str, output_dir: str = "./calibration_benchmark_results"):
         self.dataset_path = dataset_path
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
-        self.corruption_rate = corruption_rate
         
         self.config = DatasetConfig(
             batch_size=4,
@@ -740,10 +674,9 @@ class CalibrationCorrectionBenchmark:
         return dataset
     
     def run_benchmark(self, max_trajectories: Optional[int] = None) -> Dict[str, Any]:
-        """Run the calibration correction benchmark."""
+        """Run the calibration visualization benchmark."""
         print("\n" + "=" * 60)
-        print("CAMERA CALIBRATION CORRECTION BENCHMARK")
-        print(f"Corruption Rate: {self.corruption_rate}")
+        print("GROUND TRUTH CAMERA CALIBRATION ANALYSIS")
         print("=" * 60)
         
         # Load dataset
@@ -751,9 +684,8 @@ class CalibrationCorrectionBenchmark:
         
         # Process trajectories
         process_fn = partial(
-            process_single_trajectory_with_corruption, 
-            output_dir=self.output_dir,
-            corruption_rate=self.corruption_rate
+            process_single_trajectory, 
+            output_dir=self.output_dir
         )
         results_dataset = dataset.map(process_fn).materialize()
         results = list(results_dataset.iter_rows())
@@ -762,12 +694,9 @@ class CalibrationCorrectionBenchmark:
         total_trajectories = len(results)
         trajectories_with_calibration = 0
         total_cameras = 0
-        corrupted_cameras = 0
-        vlm_evaluations = 0
-        high_confidence_evaluations = 0
-        
-        rotation_errors = []
-        translation_errors = []
+        cameras_by_source = {"hf": 0, "raw": 0, "h5": 0, "serial": 0, "unknown": 0}
+        cameras_with_intrinsics = 0
+        cameras_with_visualization = 0
         
         print("\nDetailed Results:")
         print("-" * 80)
@@ -776,68 +705,43 @@ class CalibrationCorrectionBenchmark:
             if result["has_calibration"]:
                 trajectories_with_calibration += 1
                 
-                cameras_corrupted = 0
+                num_cameras = len(result["camera_evaluations"])
                 for camera_name, camera_eval in result["camera_evaluations"].items():
                     total_cameras += 1
                     
-                    if camera_eval["was_corrupted"]:
-                        corrupted_cameras += 1
-                        cameras_corrupted += 1
-                        
-                        if camera_eval["vlm_evaluation"] and camera_eval["vlm_evaluation"].get("confidence") != "UNKNOWN":
-                            vlm_evaluations += 1
-                            
-                            if camera_eval["vlm_evaluation"]["confidence"] == "HIGH":
-                                high_confidence_evaluations += 1
-                            
-                            # Collect accuracy metrics
-                            if "vlm_rotation_error" in camera_eval:
-                                rotation_errors.append(camera_eval["vlm_rotation_error"])
-                            if "vlm_translation_error" in camera_eval:
-                                translation_errors.append(camera_eval["vlm_translation_error"])
+                    # Count calibration sources
+                    source = camera_eval.get("calibration_source", "unknown")
+                    if source in cameras_by_source:
+                        cameras_by_source[source] += 1
+                    else:
+                        cameras_by_source["unknown"] += 1
+                    
+                    # Count visualizations
+                    if camera_eval.get("visualization_saved", False):
+                        cameras_with_visualization += 1
                 
-                status = "🔧" if cameras_corrupted > 0 else "✅"
-                print(f"{status} {result['trajectory_name']}: {cameras_corrupted} cameras corrupted")
-        
-        # Calculate metrics
-        actual_corruption_rate = corrupted_cameras / total_cameras if total_cameras > 0 else 0
-        vlm_evaluation_rate = vlm_evaluations / corrupted_cameras if corrupted_cameras > 0 else 0
-        high_confidence_rate = high_confidence_evaluations / vlm_evaluations if vlm_evaluations > 0 else 0
-        
-        mean_rotation_error = np.mean(rotation_errors) if rotation_errors else 0
-        mean_translation_error = np.mean(translation_errors) if translation_errors else 0
+                print(f"✅ {result['trajectory_name']}: {num_cameras} cameras with calibration")
         
         print(f"\nBenchmark Summary:")
         print(f"Total trajectories: {total_trajectories}")
         print(f"Trajectories with calibration: {trajectories_with_calibration}")
         print(f"Total cameras evaluated: {total_cameras}")
-        print(f"Cameras corrupted: {corrupted_cameras} ({actual_corruption_rate:.1%})")
-        print(f"VLM evaluations completed: {vlm_evaluations} ({vlm_evaluation_rate:.1%} of corrupted)")
-        print(f"High confidence evaluations: {high_confidence_evaluations} ({high_confidence_rate:.1%})")
-        
-        if rotation_errors:
-            print(f"\nVLM Accuracy Metrics:")
-            print(f"Mean rotation angle error: {mean_rotation_error:.2f}°")
-            print(f"Mean translation magnitude error: {mean_translation_error:.3f}m")
+        print(f"\nCalibration sources:")
+        for source, count in cameras_by_source.items():
+            if count > 0:
+                print(f"  {source}: {count} ({count/total_cameras*100:.1f}%)")
+        print(f"\nCameras with visualization: {cameras_with_visualization} ({cameras_with_visualization/total_cameras*100:.1f}%)")
         
         # Save summary
         summary = {
             "total_trajectories": total_trajectories,
             "trajectories_with_calibration": trajectories_with_calibration,
             "total_cameras": total_cameras,
-            "corrupted_cameras": corrupted_cameras,
-            "actual_corruption_rate": actual_corruption_rate,
-            "vlm_evaluations": vlm_evaluations,
-            "vlm_evaluation_rate": vlm_evaluation_rate,
-            "high_confidence_evaluations": high_confidence_evaluations,
-            "high_confidence_rate": high_confidence_rate,
-            "mean_rotation_error_deg": mean_rotation_error,
-            "mean_translation_error_m": mean_translation_error,
-            "rotation_errors": rotation_errors,
-            "translation_errors": translation_errors
+            "cameras_by_source": cameras_by_source,
+            "cameras_with_visualization": cameras_with_visualization
         }
         
-        summary_file = self.output_dir / "calibration_correction_benchmark_summary.json"
+        summary_file = self.output_dir / "calibration_analysis_summary.json"
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2)
         
@@ -847,8 +751,8 @@ class CalibrationCorrectionBenchmark:
 
 
 def main():
-    """Main function to run the calibration correction benchmark."""
-    parser = argparse.ArgumentParser(description="Run camera calibration correction benchmark using VLM")
+    """Main function to run the ground truth calibration analysis."""
+    parser = argparse.ArgumentParser(description="Analyze and visualize ground truth camera calibrations in DROID dataset")
     parser.add_argument(
         "--dataset_path", 
         type=str, 
@@ -867,12 +771,6 @@ def main():
         default=100,
         help="Maximum number of trajectories to process"
     )
-    parser.add_argument(
-        "--corruption_rate",
-        type=float,
-        default=0.5,
-        help="Rate at which to corrupt camera calibrations (0.0-1.0)"
-    )
     
     args = parser.parse_args()
     
@@ -882,17 +780,16 @@ def main():
     
     try:
         # Create and run benchmark
-        benchmark = CalibrationCorrectionBenchmark(
+        benchmark = CalibrationVisualizationBenchmark(
             dataset_path=args.dataset_path,
-            output_dir=args.output_dir,
-            corruption_rate=args.corruption_rate
+            output_dir=args.output_dir
         )
         
         summary = benchmark.run_benchmark(max_trajectories=args.max_trajectories)
         
-        print(f"\nFinal VLM Evaluation Rate: {summary['vlm_evaluation_rate']:.1%}")
-        print(f"Mean Rotation Error: {summary['mean_rotation_error_deg']:.2f}°")
-        print(f"Mean Translation Error: {summary['mean_translation_error_m']:.3f}m")
+        print(f"\nAnalysis complete!")
+        print(f"Total cameras analyzed: {summary['total_cameras']}")
+        print(f"Visualizations generated: {summary['cameras_with_visualization']}")
         
     finally:
         # Cleanup Ray

@@ -15,6 +15,7 @@ import json
 import numpy as np
 import requests
 import shutil
+import csv
 
 # URLs to the camera extrinsics JSON files on Hugging Face
 HF_JSON_URLS = {
@@ -202,9 +203,9 @@ def convert_to_serializable(obj):
         return obj
 
 
-def save_tfds_data(episode, episode_idx: int, output_dir: Path) -> dict:
+def extract_episode_metadata(episode, episode_idx: int) -> dict:
     """
-    Save TFDS data for a single episode (runs in main process).
+    Extract episode metadata from TFDS (runs in main process).
     
     Returns:
         dict: Episode metadata including ID and file path
@@ -214,46 +215,25 @@ def save_tfds_data(episode, episode_idx: int, output_dir: Path) -> dict:
     episode_id_match = re.search(r'([^/]+)/trajectory\.h5$', file_path)
     episode_id = episode_id_match.group(1) if episode_id_match else f"episode_{episode_idx}"
     
-    episode_output_dir = output_dir / episode_id
-    episode_output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Save TFDS data
-    tfds_path = episode_output_dir / "tfds_data.json"
-    
-    # Process steps data for JSON serialization
-    steps_data = []
-    # for step in episode["steps"]:
-    #     # Convert entire step to serializable format
-    #     step_data = convert_to_serializable(step)
-    #     steps_data.append(step_data)
-    
-    tfds_serializable = {
-        "episode_metadata": {
-            "file_path": file_path
-        },
-        "steps": steps_data,
-        "language_instruction": steps_data[0]["language_instruction"] if steps_data else ""
-    }
-    
-    with open(tfds_path, 'w') as f:
-        json.dump(tfds_serializable, f)
-    
-    print(f"Saved TFDS data for {episode_id} with {len(steps_data)} steps")
+    # Extract language instruction
+    steps = list(episode["steps"].as_numpy_iterator())
+    language_instruction = steps[0]["language_instruction"].decode("utf-8") if steps else ""
     
     return {
         "episode_id": episode_id,
         "file_path": file_path,
-        "episode_output_dir": str(episode_output_dir)
+        "language_instruction": language_instruction
     }
 
 
-@ray.remote
-def download_raw_data_and_extract_intrinsics(episode_metadata: dict):
+@ray.remote(num_gpus=0.01)
+def download_raw_data_and_extract_intrinsics(episode_metadata: dict, output_dir: Path):
     """
     Download raw data and extract camera intrinsics using ZED (runs in Ray).
     
     Args:
-        episode_metadata: Dict containing episode_id, file_path, and episode_output_dir
+        episode_metadata: Dict containing episode_id, file_path, and language_instruction
+        output_dir: Base output directory
         
     Returns:
         dict: Download status and camera intrinsics info
@@ -261,7 +241,8 @@ def download_raw_data_and_extract_intrinsics(episode_metadata: dict):
     try:
         episode_id = episode_metadata["episode_id"]
         file_path = episode_metadata["file_path"]
-        episode_output_dir = Path(episode_metadata["episode_output_dir"])
+        episode_output_dir = output_dir / episode_id
+        episode_output_dir.mkdir(parents=True, exist_ok=True)
         
         # Download raw trajectory
         path_parts = file_path.replace("/trajectory.h5", "").split('/')
@@ -374,6 +355,7 @@ def download_droid_dataset(
     Download DROID dataset from TFDS and raw sources.
     TFDS data is saved directly in the main process to avoid passing large data through Ray.
     Ray is used only for downloading raw data and extracting camera intrinsics with ZED.
+    Creates a CSV file with episode metadata for ingestion.
     
     Args:
         output_dir: Directory to save downloaded data
@@ -399,18 +381,18 @@ def download_droid_dataset(
         # ds = tfds.load("droid", data_dir="gs://gresearch/robotics", split="train")
         ds = tfds.load("droid_100", data_dir="/root/droid-example", split="train")
         
-        # First pass: Save TFDS data directly (no Ray)
-        print("Saving TFDS data...")
+        # First pass: Extract episode metadata from TFDS (no Ray)
+        print("Extracting episode metadata from TFDS...")
         episode_metadata_list = []
         for i, episode in enumerate(ds.take(num_episodes)):
-            metadata = save_tfds_data(episode, i, output_dir)
+            metadata = extract_episode_metadata(episode, i)
             episode_metadata_list.append(metadata)
         
         # Second pass: Download raw data and extract intrinsics using Ray
         print("Downloading raw data and extracting camera intrinsics...")
         futures = []
         for metadata in episode_metadata_list:
-            future = download_raw_data_and_extract_intrinsics.remote(metadata)
+            future = download_raw_data_and_extract_intrinsics.remote(metadata, output_dir)
             futures.append(future)
             
             # Limit concurrent tasks
@@ -475,6 +457,85 @@ def download_droid_dataset(
         
         print(f"Download summary saved to: {summary_path}")
         
+        # Create CSV file with episode metadata
+        csv_path = output_dir / "episode_metadata.csv"
+        with open(csv_path, 'w', newline='') as csvfile:
+            fieldnames = [
+                'episode_id', 
+                'raw_data_path', 
+                'tfds_file_path',
+                'language_instruction',
+                'wrist_serial', 
+                'wrist_intrinsics',
+                'wrist_extrinsics',
+                'ext1_serial', 
+                'ext1_intrinsics',
+                'ext1_extrinsics',
+                'ext2_serial',
+                'ext2_intrinsics',
+                'ext2_extrinsics',
+                'task_successful'
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            # Combine episode metadata with download results
+            episode_map = {m["episode_id"]: m for m in episode_metadata_list}
+            
+            # Process each episode directory
+            for episode_dir in sorted(output_dir.iterdir()):
+                if episode_dir.is_dir() and episode_dir.name != "huggingface_cache":
+                    episode_id = episode_dir.name
+                    row_data = {'episode_id': episode_id}
+                    
+                    # Add TFDS metadata
+                    if episode_id in episode_map:
+                        tfds_meta = episode_map[episode_id]
+                        row_data['tfds_file_path'] = tfds_meta['file_path']
+                        row_data['language_instruction'] = tfds_meta['language_instruction']
+                    
+                    # Check if download was successful
+                    download_metadata_path = episode_dir / "download_metadata.json"
+                    if download_metadata_path.exists():
+                        with open(download_metadata_path, 'r') as f:
+                            download_meta = json.load(f)
+                        
+                        if not download_meta.get("download_success", False):
+                            continue
+                        
+                        # Task success from GS path
+                        gs_path = download_meta.get("gs_path", "")
+                        row_data['task_successful'] = 'success' in gs_path.lower()
+                    
+                    # Find raw data path - should be the raw_data directory itself
+                    raw_data_path = episode_dir / "raw_data"
+                    if raw_data_path.exists():
+                        row_data['raw_data_path'] = str(raw_data_path)
+                    
+                    # Load camera intrinsics
+                    intrinsics_path = episode_dir / "camera_intrinsics.json"
+                    if intrinsics_path.exists():
+                        with open(intrinsics_path, 'r') as f:
+                            episode_intrinsics = json.load(f)
+                        
+                        # Process each camera serial
+                        for serial, intrinsics_data in episode_intrinsics.items():
+                            camera_name = intrinsics_data.get('camera_name', '')
+                            
+                            if camera_name == 'wrist':
+                                row_data['wrist_serial'] = serial
+                                row_data['wrist_intrinsics'] = json.dumps(intrinsics_data.get('intrinsic_matrix', []))
+                            elif camera_name == 'exterior_image_1':
+                                row_data['ext1_serial'] = serial
+                                row_data['ext1_intrinsics'] = json.dumps(intrinsics_data.get('intrinsic_matrix', []))
+                            elif camera_name == 'exterior_image_2':
+                                row_data['ext2_serial'] = serial
+                                row_data['ext2_intrinsics'] = json.dumps(intrinsics_data.get('intrinsic_matrix', []))
+                                        
+                    writer.writerow(row_data)
+        
+        print(f"Episode metadata CSV saved to: {csv_path}")
+        
     finally:
         ray.shutdown()
 
@@ -485,7 +546,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="./droid_downloaded_data", 
                         help="Directory to save downloaded data")
-    parser.add_argument("--num_episodes", type=int, default=10,
+    parser.add_argument("--num_episodes", type=int, default=100,
                         help="Number of episodes to download")
     parser.add_argument("--num_workers", type=int, default=64,
                         help="Number of parallel workers")

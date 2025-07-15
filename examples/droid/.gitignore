@@ -7,3 +7,5 @@ trajectory_captioning_results/
 droid_combined_data/
 huggingface_cache/
 droid_100/
+calibration_benchmark_results/
+droid_downloaded_data/
