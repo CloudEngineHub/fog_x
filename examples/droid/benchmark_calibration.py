@@ -18,6 +18,7 @@ import ray
 from functools import partial
 
 from robodm.dataset import VLADataset, DatasetConfig
+from robodm.agent.vlm_service import get_vlm_service
 
 
 def load_ground_truth_calibration(trajectory: Dict[str, Any]) -> Dict[str, Any]:
@@ -47,8 +48,8 @@ def load_ground_truth_calibration(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     if extrinsic_keys:
         print(f"Available extrinsic keys (sample): {sorted(extrinsic_keys)[:5]}...")
     
-    # Camera names to check
-    camera_names = ["wrist", "exterior_image_1", "exterior_image_2"]
+    # Camera names to check - only exterior/side cameras
+    camera_names = ["exterior_image_1", "exterior_image_2"]
     
     # Extract language instruction from various possible locations
     # Try TFDS format first
@@ -365,7 +366,7 @@ def project_point_to_image(point_3d: np.ndarray, extrinsic: np.ndarray, intrinsi
         return -1, -1  # Point behind camera
 
 
-def visualize_ground_truth_calibration(
+def visualize_end_effector_point(
     trajectory: Dict[str, Any],
     ground_truth_extrinsic: np.ndarray,
     camera_name: str,
@@ -374,10 +375,10 @@ def visualize_ground_truth_calibration(
     language_instruction: str = ""
 ) -> np.ndarray:
     """
-    Visualize end effector trajectory using ground truth calibration.
+    Visualize end effector position as a large point using ground truth calibration.
     
     Returns:
-        Visualization image showing the ground truth calibration
+        Visualization image showing the end effector point
     """
     if intrinsic is None:
         print(f"Warning: No intrinsic matrix found for {camera_name}, using default")
@@ -429,62 +430,53 @@ def visualize_ground_truth_calibration(
         print(f"Warning: Empty end effector position data for {camera_name}")
         return None
     
-    # Select multiple frames throughout the trajectory to show the trajectory
-    num_frames = min(10, len(images))  # Show up to 10 points along trajectory
-    frame_indices = np.linspace(0, len(images) - 1, num_frames, dtype=int)
-    
-    # Use the middle frame as the base image
-    base_frame_idx = len(images) // 2
-    visualization_frame = images[base_frame_idx].copy()
+    # Use the last frame to show the final end effector position
+    final_frame_idx = len(images) - 1
+    visualization_frame = images[final_frame_idx].copy()
     
     # Validate extrinsic matrix
     if ground_truth_extrinsic.shape != (4, 4):
         print(f"ERROR: ground_truth_extrinsic has shape {ground_truth_extrinsic.shape}, expected (4, 4)")
         return None
     
-    # Draw the end effector trajectory across multiple frames
-    trajectory_points = []
-    for frame_idx in frame_indices:
-        if frame_idx < len(ee_positions):
-            ee_pos_raw = ee_positions[frame_idx]
-            
-            # Handle different position formats
-            if isinstance(ee_pos_raw, (list, np.ndarray)):
-                if len(ee_pos_raw) >= 7:
-                    # 7-element format: [x, y, z, qx, qy, qz, qw]
-                    ee_pos = ee_pos_raw[:3]
-                elif len(ee_pos_raw) == 6:
-                    # 6-element format: [x, y, z, roll, pitch, yaw]
-                    ee_pos = ee_pos_raw[:3]
-                elif len(ee_pos_raw) == 3:
-                    # Already just position
-                    ee_pos = ee_pos_raw
-                else:
-                    print(f"Warning: Unexpected ee_pos shape: {len(ee_pos_raw)}")
-                    continue
+    # Get the final end effector position
+    if final_frame_idx < len(ee_positions):
+        ee_pos_raw = ee_positions[final_frame_idx]
+        
+        # Handle different position formats
+        if isinstance(ee_pos_raw, (list, np.ndarray)):
+            if len(ee_pos_raw) >= 7:
+                # 7-element format: [x, y, z, qx, qy, qz, qw]
+                ee_pos = ee_pos_raw[:3]
+            elif len(ee_pos_raw) == 6:
+                # 6-element format: [x, y, z, roll, pitch, yaw]
+                ee_pos = ee_pos_raw[:3]
+            elif len(ee_pos_raw) == 3:
+                # Already just position
+                ee_pos = ee_pos_raw
             else:
-                print(f"Warning: Unexpected ee_pos type: {type(ee_pos_raw)}")
-                continue
-            
-            # Ensure ee_pos is a numpy array with 3 elements
-            ee_pos = np.array(ee_pos)[:3]
-            
-            # Project using ground truth calibration
-            px, py = project_point_to_image(ee_pos, ground_truth_extrinsic, intrinsic)
-            if px >= 0 and py >= 0 and px < visualization_frame.shape[1] and py < visualization_frame.shape[0]:
-                trajectory_points.append((px, py))
-                # Draw circle for each point
-                cv2.circle(visualization_frame, (px, py), 5, (0, 255, 0), -1)  # Green filled circle
-    
-    # Draw lines connecting the trajectory points
-    if len(trajectory_points) > 1:
-        for i in range(len(trajectory_points) - 1):
-            cv2.line(visualization_frame, trajectory_points[i], trajectory_points[i+1], (0, 255, 0), 2)
+                print(f"Warning: Unexpected ee_pos shape: {len(ee_pos_raw)}")
+                return None
+        else:
+            print(f"Warning: Unexpected ee_pos type: {type(ee_pos_raw)}")
+            return None
+        
+        # Ensure ee_pos is a numpy array with 3 elements
+        ee_pos = np.array(ee_pos)[:3]
+        
+        # Project using ground truth calibration
+        px, py = project_point_to_image(ee_pos, ground_truth_extrinsic, intrinsic)
+        if px >= 0 and py >= 0 and px < visualization_frame.shape[1] and py < visualization_frame.shape[0]:
+            # Draw a large circle for the end effector position
+            cv2.circle(visualization_frame, (px, py), 30, (0, 255, 0), -1)  # Large green filled circle
+            cv2.circle(visualization_frame, (px, py), 32, (0, 0, 0), 2)  # Black border for visibility
+        else:
+            print(f"Warning: End effector point ({px}, {py}) is outside image bounds")
     
     # Add labels
     cv2.putText(visualization_frame, f"Ground Truth Calibration - {camera_name}", (10, 30), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-    cv2.putText(visualization_frame, f"End Effector Trajectory (Green)", (10, 60), 
+    cv2.putText(visualization_frame, f"End Effector Position (Green)", (10, 60), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     
     # Add language instruction if available
@@ -525,12 +517,72 @@ def visualize_ground_truth_calibration(
 
 
 
+def analyze_calibration_with_vlm(
+    visualization_frame: np.ndarray,
+    camera_name: str,
+    language_instruction: str = ""
+) -> Dict[str, Any]:
+    """
+    Use VLM to analyze if the calibration appears correct.
+    
+    Returns:
+        Dictionary with VLM analysis results
+    """
+    try:
+        # Initialize VLM service
+        vlm_service = get_vlm_service()
+        vlm_service.initialize()
+        
+        # Create prompt for calibration analysis
+        vlm_prompt = (
+            "This image shows a robot's end effector position (large green circle) projected onto a camera view. "
+            "The robot was performing the following task: '{}'. "
+            "Please analyze if the calibration appears correct by checking if:"
+            "\n1. The green dot is positioned where you would expect the robot's end effector to be"
+            "\n2. The position makes sense given the task description"
+            "\n3. The dot is not obviously misplaced (e.g., floating in air, inside objects, etc.)"
+            "\n\nRespond with only 'CORRECT' or 'INCORRECT' followed by a brief explanation."
+            "\n\nFormat: CORRECT/INCORRECT: Your one sentence explanation"
+        ).format(language_instruction if language_instruction else "Task description not available")
+        
+        # Get VLM response
+        vlm_response = vlm_service.analyze_image(visualization_frame, vlm_prompt)
+        
+        # Parse response
+        response_lower = vlm_response.strip().lower()
+        is_correct = False
+        explanation = vlm_response
+        
+        if response_lower.startswith("correct"):
+            is_correct = True
+            explanation = vlm_response[7:].strip(": ")
+        elif response_lower.startswith("incorrect"):
+            is_correct = False
+            explanation = vlm_response[9:].strip(": ")
+        
+        return {
+            "vlm_assessment": "correct" if is_correct else "incorrect",
+            "vlm_explanation": explanation,
+            "vlm_raw_response": vlm_response
+        }
+        
+    except Exception as e:
+        print(f"Error in VLM analysis: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "vlm_assessment": "error",
+            "vlm_explanation": f"VLM analysis failed: {str(e)}",
+            "vlm_raw_response": ""
+        }
+
+
 def process_single_trajectory(
     trajectory: Dict[str, Any], 
     output_dir: Path
 ) -> Dict[str, Any]:
     """
-    Process a single trajectory and visualize ground truth calibration.
+    Process a single trajectory and visualize ground truth calibration with VLM analysis.
     """
     file_path = trajectory.get("__file_path__", "")
     traj_name = Path(file_path).stem
@@ -596,7 +648,7 @@ def process_single_trajectory(
         
         # Generate visualization
         vis_path = output_dir / f"{traj_name}_{camera_name}_calibration.jpg"
-        vis_image = visualize_ground_truth_calibration(
+        vis_image = visualize_end_effector_point(
             trajectory, gt_extrinsic, camera_name, intrinsic, vis_path,
             language_instruction=calibration_data.get("language_instruction", "")
         )
@@ -604,8 +656,21 @@ def process_single_trajectory(
         if vis_image is not None:
             camera_results["visualization_saved"] = True
             print(f"  Visualization saved to: {vis_path}")
+            
+            # Analyze calibration with VLM
+            print(f"  Analyzing calibration with VLM...")
+            vlm_results = analyze_calibration_with_vlm(
+                vis_image, camera_name, 
+                calibration_data.get("language_instruction", "")
+            )
+            
+            camera_results.update(vlm_results)
+            print(f"  VLM Assessment: {vlm_results['vlm_assessment'].upper()}")
+            print(f"  VLM Explanation: {vlm_results['vlm_explanation']}")
         else:
             camera_results["visualization_saved"] = False
+            camera_results["vlm_assessment"] = "no_visualization"
+            camera_results["vlm_explanation"] = "Could not generate visualization"
             print(f"  WARNING: Could not generate visualization")
         
         results["camera_evaluations"][camera_name] = camera_results
@@ -614,6 +679,20 @@ def process_single_trajectory(
     results_file = output_dir / f"{traj_name}_calibration_results.json"
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2, default=str)
+    
+    # Also save text summary
+    summary_file = output_dir / f"{traj_name}_calibration_summary.txt"
+    with open(summary_file, 'w') as f:
+        f.write(f"Calibration Analysis Results\n")
+        f.write(f"===========================\n")
+        f.write(f"Trajectory: {traj_name}\n")
+        f.write(f"Task: {results['language_instruction']}\n\n")
+        
+        for camera_name, camera_eval in results["camera_evaluations"].items():
+            f.write(f"\nCamera: {camera_name}\n")
+            f.write(f"Calibration source: {camera_eval.get('calibration_source', 'unknown')}\n")
+            f.write(f"VLM Assessment: {camera_eval.get('vlm_assessment', 'N/A').upper()}\n")
+            f.write(f"VLM Explanation: {camera_eval.get('vlm_explanation', 'N/A')}\n")
     
     return results
 
@@ -697,6 +776,7 @@ class CalibrationVisualizationBenchmark:
         cameras_by_source = {"hf": 0, "raw": 0, "h5": 0, "serial": 0, "unknown": 0}
         cameras_with_intrinsics = 0
         cameras_with_visualization = 0
+        vlm_assessments = {"correct": 0, "incorrect": 0, "error": 0, "no_visualization": 0}
         
         print("\nDetailed Results:")
         print("-" * 80)
@@ -719,8 +799,16 @@ class CalibrationVisualizationBenchmark:
                     # Count visualizations
                     if camera_eval.get("visualization_saved", False):
                         cameras_with_visualization += 1
+                    
+                    # Count VLM assessments
+                    vlm_assessment = camera_eval.get("vlm_assessment", "error")
+                    if vlm_assessment in vlm_assessments:
+                        vlm_assessments[vlm_assessment] += 1
                 
-                print(f"✅ {result['trajectory_name']}: {num_cameras} cameras with calibration")
+                # Print summary with VLM results
+                correct_cams = sum(1 for cam_eval in result["camera_evaluations"].values() 
+                                 if cam_eval.get("vlm_assessment") == "correct")
+                print(f"✅ {result['trajectory_name']}: {num_cameras} cameras, {correct_cams} with correct calibration")
         
         print(f"\nBenchmark Summary:")
         print(f"Total trajectories: {total_trajectories}")
@@ -731,6 +819,10 @@ class CalibrationVisualizationBenchmark:
             if count > 0:
                 print(f"  {source}: {count} ({count/total_cameras*100:.1f}%)")
         print(f"\nCameras with visualization: {cameras_with_visualization} ({cameras_with_visualization/total_cameras*100:.1f}%)")
+        print(f"\nVLM Calibration Assessment:")
+        for assessment, count in vlm_assessments.items():
+            if count > 0:
+                print(f"  {assessment}: {count} ({count/total_cameras*100:.1f}%)")
         
         # Save summary
         summary = {
@@ -738,7 +830,8 @@ class CalibrationVisualizationBenchmark:
             "trajectories_with_calibration": trajectories_with_calibration,
             "total_cameras": total_cameras,
             "cameras_by_source": cameras_by_source,
-            "cameras_with_visualization": cameras_with_visualization
+            "cameras_with_visualization": cameras_with_visualization,
+            "vlm_assessments": vlm_assessments
         }
         
         summary_file = self.output_dir / "calibration_analysis_summary.json"
@@ -746,6 +839,11 @@ class CalibrationVisualizationBenchmark:
             json.dump(summary, f, indent=2)
         
         print(f"\n✅ Results saved to {self.output_dir}/")
+        
+        # Calculate calibration accuracy
+        if total_cameras > 0:
+            calibration_accuracy = vlm_assessments.get("correct", 0) / total_cameras
+            print(f"\nCalibration Accuracy: {calibration_accuracy:.3f} ({vlm_assessments.get('correct', 0)}/{total_cameras})")
         
         return summary
 
