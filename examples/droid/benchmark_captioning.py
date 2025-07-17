@@ -148,14 +148,23 @@ def process_single_trajectory_for_captioning(trajectory: Dict[str, Any], output_
     exterior_cameras = {}
     
     for key in trajectory.keys():
-        if "raw/images/" in key or "observation/images/" in key or "image" in key.lower():
+        if "raw/images/" in key or "observation/images/" in key or ("image" in key.lower() and "intrinsics" not in key and "extrinsics" not in key):
             camera_keys.append(key)
             # Check for exterior cameras
             if "exterior" in key or "ext" in key:
-                if "1" in key or "image_1" in key:
-                    exterior_cameras["exterior_1"] = key
-                elif "2" in key or "image_2" in key:
-                    exterior_cameras["exterior_2"] = key
+                # Prioritize specific image data keys
+                if ("exterior_image_1" in key or "exterior_1" in key) and "intrinsics" not in key and "extrinsics" not in key:
+                    # Prefer raw/images over tfds keys for full resolution
+                    if "raw/images/exterior_image_1" in key:
+                        exterior_cameras["exterior_1"] = key
+                    elif "tfds/observation/exterior_image_1" in key and "exterior_1" not in exterior_cameras:
+                        exterior_cameras["exterior_1"] = key
+                elif ("exterior_image_2" in key or "exterior_2" in key) and "intrinsics" not in key and "extrinsics" not in key:
+                    if "raw/images/exterior_image_2" in key:
+                        exterior_cameras["exterior_2"] = key
+                    elif "tfds/observation/exterior_image_2" in key and "exterior_2" not in exterior_cameras:
+                        exterior_cameras["exterior_2"] = key
+    
     
     # If no exterior cameras found, skip
     if not exterior_cameras:
@@ -215,7 +224,7 @@ def process_single_trajectory_for_captioning(trajectory: Dict[str, Any], output_
                     "These are 6 frames from a robot trajectory shown in temporal order "
                     "(left to right, top to bottom). Please describe with one sentence what task the robot "
                     "is performing in this trajectory. Be very specific about the "
-                    "actions and objects involved."
+                    "actions and objects involved. Such as Put the orange toy into the wooden box, Take the lid off the silver pot and put it on the table"
                 )
                 
                 vlm_caption = vlm_service.analyze_image(stitched_frame, vlm_prompt)
@@ -233,7 +242,7 @@ def process_single_trajectory_for_captioning(trajectory: Dict[str, Any], output_
                 vlm_service = get_vlm_service()
                 vlm_service.initialize()
                 
-                comparison_prompt = f"""Compare these two robot task descriptions and determine if they describe the same or similar task:
+                comparison_prompt = f"""Compare these one of the robot task descriptions of Groundtruth to VLM Caption and determine if they describe relevant task:
 
 Description 1 (Ground Truth): {ground_truth}
 
