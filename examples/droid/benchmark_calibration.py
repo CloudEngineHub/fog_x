@@ -473,11 +473,6 @@ def visualize_end_effector_point(
         else:
             print(f"Warning: End effector point ({px}, {py}) is outside image bounds")
     
-    # Add labels
-    cv2.putText(visualization_frame, f"Ground Truth Calibration - {camera_name}", (10, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-    cv2.putText(visualization_frame, f"End Effector Position (Green)", (10, 60), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     
     # Add language instruction if available
     if language_instruction:
@@ -502,8 +497,6 @@ def visualize_end_effector_point(
         
         # Draw task instruction
         y_offset = 90
-        cv2.putText(visualization_frame, "Task:", (10, y_offset), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
         for i, line in enumerate(lines[:3]):  # Limit to 3 lines
             cv2.putText(visualization_frame, line, (10, y_offset + 25 * (i + 1)), 
@@ -536,10 +529,8 @@ def analyze_calibration_with_vlm(
         # Create prompt for calibration analysis
         vlm_prompt = (
             "This image shows a robot's end effector position (large green circle) projected onto a camera view. "
-            "The robot was performing the following task: '{}'. "
             "Please analyze if the calibration appears correct by checking if:"
-            "\n1. The green dot is positioned where you would expect the robot's end effector to be"
-            "\n2. The position makes sense given the task description"
+            "\n1. The green dot is positioned where you would expect the robot's end effector at the end of the robot's arm connecting to th gripper"
             "\n3. The dot is not obviously misplaced (e.g., floating in air, inside objects, etc.)"
             "\n\nRespond with only 'CORRECT' or 'INCORRECT' followed by a brief explanation."
             "\n\nFormat: CORRECT/INCORRECT: Your one sentence explanation"
