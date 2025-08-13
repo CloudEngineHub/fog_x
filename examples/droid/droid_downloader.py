@@ -378,8 +378,8 @@ def download_droid_dataset(
     try:
         # Load TFDS dataset
         print("Loading DROID dataset from TFDS...")
-        # ds = tfds.load("droid", data_dir="gs://gresearch/robotics", split="train")
-        ds = tfds.load("droid_100", data_dir="/root/droid-example", split="train")
+        ds = tfds.load("droid", data_dir="gs://gresearch/robotics", split="train")
+        # ds = tfds.load("droid_100", data_dir="/root/droid-example", split="train")
         
         # First pass: Extract episode metadata from TFDS (no Ray)
         print("Extracting episode metadata from TFDS...")
@@ -546,7 +546,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="./droid_downloaded_data", 
                         help="Directory to save downloaded data")
-    parser.add_argument("--num_episodes", type=int, default=100,
+    parser.add_argument("--num_episodes", type=int, default=3000,
                         help="Number of episodes to download")
     parser.add_argument("--num_workers", type=int, default=64,
                         help="Number of parallel workers")

@@ -548,15 +548,15 @@ def convert_single_trajectory(traj_dir: str, output_dir: str) -> Tuple[bool, str
 if __name__ == "__main__":
     # Example usage
     processor = DROIDProcessor()
-    output_dir = "./robodm_trajectories"
+    output_dir = "/home/kych/robodm/robodm_trajectories"
 
     try:
         # Parallel download and conversion with 300 success + 100 failure trajectories
         print("Starting parallel download and conversion...")
         successful_paths = processor.download_sample_trajectories(
             output_dir=output_dir, 
-            num_success=50, 
-            num_failure=50
+            num_success=500, 
+            num_failure=500
         )
         
         print(f"\nSuccessfully processed {len(successful_paths)} trajectories:")

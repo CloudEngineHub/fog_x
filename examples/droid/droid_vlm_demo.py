@@ -577,7 +577,7 @@ def main():
 
     # Configuration
     parser = argparse.ArgumentParser(description="Run the DROID VLM demo")
-    parser.add_argument("--data_dir", type=str, default="./robodm_trajectories", help="Directory containing RoboDM trajectory files")
+    parser.add_argument("--data_dir", type=str, default="/home/kych/robodm/robodm_trajectories", help="Directory containing RoboDM trajectory files")
     parser.add_argument("--max_trajectories", type=int, default=100, help="Maximum number of trajectories to process")
     args = parser.parse_args()
 
