@@ -19,6 +19,7 @@ from robodm.backend.base import ContainerBackend
 # Backend abstraction
 from robodm.backend.pyav_backend import PyAVBackend
 from robodm.backend.parquet_backend import ParquetBackend
+from robodm.backend.hdf5_backend import HDF5Backend
 from robodm.trajectory_base import TrajectoryInterface
 from robodm.utils.flatten import _flatten_dict
 
@@ -118,16 +119,25 @@ class Trajectory(TrajectoryInterface):
         # Container backend setup
         # ------------------------------------------------------------------ #
         if backend is None:
-            # Default to PyAV backend for backward compatibility
-            self.backend: ContainerBackend = PyAVBackend()
+            # Auto-detect backend based on file extension
+            _, ext = os.path.splitext(self.path.lower())
+            if ext in {".h5", ".hdf5"}:
+                self.backend: ContainerBackend = HDF5Backend()
+            elif ext in {".parquet", ".pq"}:
+                self.backend = ParquetBackend()
+            else:
+                # Default to PyAV backend for backward compatibility
+                self.backend = PyAVBackend()
         elif isinstance(backend, str):
             # Allow string specification of backend type
             if backend.lower() == "parquet":
                 self.backend = ParquetBackend()
             elif backend.lower() == "pyav":
                 self.backend = PyAVBackend()
+            elif backend.lower() == "hdf5":
+                self.backend = HDF5Backend()
             else:
-                raise ValueError(f"Unknown backend type: {backend}. Use 'parquet' or 'pyav'")
+                raise ValueError(f"Unknown backend type: {backend}. Use 'parquet', 'pyav', or 'hdf5'")
         else:
             # Use provided backend instance
             self.backend = backend
@@ -264,12 +274,16 @@ class Trajectory(TrajectoryInterface):
                 f"Container was closed but {self.path} doesn't exist. This might indicate an issue."
             )
 
-        # Only attempt transcoding if file exists, has content, and compact is requested
+        # Only attempt transcoding if file exists, has content, compact is requested, and not using HDF5 backend
         if (compact and has_data and self._exists(self.path)
-                and os.path.getsize(self.path) > 0):
+                and os.path.getsize(self.path) > 0
+                and not isinstance(self.backend, HDF5Backend)):
             logger.debug(
                 "Starting intelligent transcoding based on feature types")
             self._transcode_by_feature_type()
+        elif isinstance(self.backend, HDF5Backend):
+            logger.debug("Skipping transcoding for HDF5 backend (not needed)")
+        
         else:
             logger.debug(
                 f"Skipping transcoding: compact={compact}, has_data={has_data}, file_exists={self._exists(self.path)}, file_size={os.path.getsize(self.path) if self._exists(self.path) else 0}"
