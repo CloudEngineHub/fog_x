@@ -137,36 +137,52 @@ def extract_vlm_prediction(vlm_response: str, question: str) -> Optional[bool]:
     
     response_lower = vlm_response.lower()
     
-    # Common positive indicators
+    # Look for clear Yes/No at the start of the response (most reliable)
+    response_start = response_lower.strip()[:50]  # First 50 characters
+    
+    if re.match(r'^(yes|y)\b', response_start):
+        return True
+    elif re.match(r'^(no|n)\b', response_start):
+        return False
+    
+    # Look for definitive statements in first sentence
+    first_sentence = response_lower.split('.')[0] if '.' in response_lower else response_lower[:200]
+    
+    # Strong positive indicators in first sentence
+    if re.search(r'\b(yes|successful|completed|achieved)\b', first_sentence):
+        return True
+    
+    # Strong negative indicators in first sentence
+    if re.search(r'\b(no|fail(ed|ure)?|unsuccessful|incomplete)\b', first_sentence):
+        return False
+    
+    # Fallback: pattern matching with weights
     positive_patterns = [
         r'\byes\b', r'\btrue\b', r'\bsuccess(ful)?\b', r'\bcompleted?\b',
         r'\bachieved?\b', r'\baccomplished\b', r'\bworked?\b'
     ]
     
-    # Common negative indicators
     negative_patterns = [
         r'\bno\b', r'\bfalse\b', r'\bfail(ed|ure)?\b', r'\bincomplete\b',
         r'\bunsuccessful\b', r'\bdid\s+not\b', r'\bdidn\'t\b'
     ]
     
-    # Count pattern matches
-    positive_count = sum(1 for pattern in positive_patterns if re.search(pattern, response_lower))
-    negative_count = sum(1 for pattern in negative_patterns if re.search(pattern, response_lower))
+    # Weight early occurrences more heavily
+    first_100_chars = response_lower[:100]
+    positive_early = sum(2 for pattern in positive_patterns if re.search(pattern, first_100_chars))
+    negative_early = sum(2 for pattern in negative_patterns if re.search(pattern, first_100_chars))
     
-    # Determine prediction based on pattern counts
-    if positive_count > negative_count:
+    # Count all occurrences 
+    positive_total = sum(1 for pattern in positive_patterns if re.search(pattern, response_lower))
+    negative_total = sum(1 for pattern in negative_patterns if re.search(pattern, response_lower))
+    
+    total_positive = positive_early + positive_total
+    total_negative = negative_early + negative_total
+    
+    if total_positive > total_negative and total_positive > 0:
         return True
-    elif negative_count > positive_count:
+    elif total_negative > total_positive and total_negative > 0:
         return False
-    
-    # Check for explicit boolean responses at the beginning
-    response_words = response_lower.split()
-    if response_words:
-        first_word = response_words[0]
-        if first_word in {'yes', 'true', 'success', 'successful'}:
-            return True
-        elif first_word in {'no', 'false', 'failure', 'failed'}:
-            return False
     
     return None
 
@@ -257,8 +273,18 @@ def validate_vlm_responses(
         elif ground_truth_source == "metadata" and metadata_key:
             ground_truth = extract_ground_truth_from_metadata(trajectory_path, metadata_key)
         elif ground_truth_source == "manual":
-            # Try multiple key formats
-            for key in [trajectory_path, os.path.basename(trajectory_path), os.path.splitext(os.path.basename(trajectory_path))[0]]:
+            # Try multiple key formats to handle path mismatches
+            candidate_keys = [
+                trajectory_path,  # Exact match
+                os.path.basename(trajectory_path),  # Just filename
+                os.path.splitext(os.path.basename(trajectory_path))[0],  # Filename without extension
+                # Handle trajectory.h5 suffix removal
+                trajectory_path.replace('/trajectory.h5', '') if trajectory_path.endswith('/trajectory.h5') else trajectory_path,
+                # Handle directory path extraction for trajectory.h5 files
+                os.path.dirname(trajectory_path) if trajectory_path.endswith('/trajectory.h5') else trajectory_path
+            ]
+            
+            for key in candidate_keys:
                 if key in manual_gt:
                     ground_truth = manual_gt[key]
                     break

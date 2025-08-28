@@ -20,6 +20,7 @@ from robodm.backend.base import ContainerBackend
 from robodm.backend.pyav_backend import PyAVBackend
 from robodm.backend.parquet_backend import ParquetBackend
 from robodm.backend.hdf5_backend import HDF5Backend
+from robodm.backend.droid_backend import DROIDBackend
 from robodm.trajectory_base import TrajectoryInterface
 from robodm.utils.flatten import _flatten_dict
 
@@ -119,15 +120,24 @@ class Trajectory(TrajectoryInterface):
         # Container backend setup
         # ------------------------------------------------------------------ #
         if backend is None:
-            # Auto-detect backend based on file extension
-            _, ext = os.path.splitext(self.path.lower())
-            if ext in {".h5", ".hdf5"}:
-                self.backend: ContainerBackend = HDF5Backend()
-            elif ext in {".parquet", ".pq"}:
-                self.backend = ParquetBackend()
+            # Auto-detect backend based on file extension or directory structure
+            if os.path.isdir(self.path):
+                # Check if it's a DROID directory
+                if (os.path.exists(os.path.join(self.path, "trajectory.h5")) and
+                    os.path.exists(os.path.join(self.path, "recordings"))):
+                    self.backend: ContainerBackend = DROIDBackend()
+                else:
+                    raise ValueError(f"Directory {self.path} does not appear to be a DROID trajectory")
             else:
-                # Default to PyAV backend for backward compatibility
-                self.backend = PyAVBackend()
+                # Auto-detect backend based on file extension
+                _, ext = os.path.splitext(self.path.lower())
+                if ext in {".h5", ".hdf5"}:
+                    self.backend = HDF5Backend()
+                elif ext in {".parquet", ".pq"}:
+                    self.backend = ParquetBackend()
+                else:
+                    # Default to PyAV backend for backward compatibility
+                    self.backend = PyAVBackend()
         elif isinstance(backend, str):
             # Allow string specification of backend type
             if backend.lower() == "parquet":
@@ -136,8 +146,10 @@ class Trajectory(TrajectoryInterface):
                 self.backend = PyAVBackend()
             elif backend.lower() == "hdf5":
                 self.backend = HDF5Backend()
+            elif backend.lower() == "droid":
+                self.backend = DROIDBackend()
             else:
-                raise ValueError(f"Unknown backend type: {backend}. Use 'parquet', 'pyav', or 'hdf5'")
+                raise ValueError(f"Unknown backend type: {backend}. Use 'parquet', 'pyav', 'hdf5', or 'droid'")
         else:
             # Use provided backend instance
             self.backend = backend
@@ -198,7 +210,29 @@ class Trajectory(TrajectoryInterface):
         return time.time()
 
     def __len__(self):
-        raise NotImplementedError
+        """Get the length of the trajectory in timesteps."""
+        # Try backend-specific length methods first
+        if hasattr(self.backend, 'get_trajectory_length'):
+            return self.backend.get_trajectory_length()
+        elif hasattr(self.backend, '_get_trajectory_length'):
+            return self.backend._get_trajectory_length()
+        
+        # Fallback: use loaded trajectory data if available
+        if hasattr(self, 'trajectory_data') and self.trajectory_data:
+            # Find first feature and use its length
+            for feature_name, feature_data in self.trajectory_data.items():
+                if hasattr(feature_data, '__len__'):
+                    return len(feature_data)
+        
+        # Last resort: try to get from streams
+        if hasattr(self, 'backend') and self.backend:
+            streams = self.backend.get_streams()
+            if streams:
+                # For now, return 0 if we can't determine length
+                logger.warning("Could not determine trajectory length")
+                return 0
+        
+        return 0
 
     def __getitem__(self, key):
         """
@@ -667,10 +701,23 @@ class Trajectory(TrajectoryInterface):
                     f"Created object array for '{fname}': shape={out[fname].shape}"
                 )
             else:
-                out[fname] = np.asarray(lst, dtype=ft.dtype)
-                logger.debug(
-                    f"Created {ft.dtype} array for '{fname}': shape={out[fname].shape}"
-                )
+                try:
+                    out[fname] = np.asarray(lst, dtype=ft.dtype)
+                    logger.debug(
+                        f"Created {ft.dtype} array for '{fname}': shape={out[fname].shape}"
+                    )
+                except ValueError as e:
+                    if "setting an array element with a sequence" in str(e):
+                        # Handle inconsistent data shapes by creating object array
+                        logger.debug(
+                            f"Data shapes inconsistent for '{fname}', creating object array: {e}"
+                        )
+                        out[fname] = np.array(lst, dtype=object)
+                        logger.debug(
+                            f"Created object array for '{fname}' due to shape inconsistency: shape={out[fname].shape}"
+                        )
+                    else:
+                        raise
 
         logger.debug(
             f"load() returning {len(out)} features: {list(out.keys())}")

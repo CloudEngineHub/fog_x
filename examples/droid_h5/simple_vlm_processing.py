@@ -327,7 +327,29 @@ def process_single_trajectory(
         context = f"\nLanguage instruction: '{language_instruction}'" if language_instruction else ""
         
         if use_state_visualization:
-            full_prompt = f"{question}{context}\n\nPlease analyze these {num_frames_to_use} visualizations showing the robot's state data (actions, joint positions, cartesian position, and gripper position over time) and provide a clear answer about the trajectory."
+            full_prompt = f"""Analyze these {num_frames_to_use} robot state visualizations and answer: {question}
+
+The plots show:
+1. Robot actions over time (control commands)
+2. Joint positions over time (robot arm configuration)  
+3. Cartesian position trajectory (end-effector path)
+4. Gripper position over time (open/close state)
+
+CRITICAL: Smooth-looking trajectories do NOT always mean success! Many robot failures appear smooth but fail to achieve the task goal.
+
+For success classification, look for:
+- SUCCESSFUL: Goal achievement indicators - reaching target positions, completing full task sequence, appropriate final states
+- FAILED: Task incompletion signs - stopping short of targets, incomplete motion sequences, premature endings, suboptimal final positions
+
+Key failure patterns to identify:
+- Trajectories that end prematurely or don't reach intended targets
+- Motion that looks controlled but accomplishes nothing meaningful  
+- Missing expected motion phases (approach, grasp, transport, place)
+- Final gripper/joint positions that suggest incomplete tasks
+
+You must choose either "Yes" (successful) or "No" (failed). Do not hedge. Be critical - if you see any signs the robot didn't complete its intended task, answer "No".
+
+Answer with a clear Yes or No first, then explain your reasoning based on task completion evidence.{context}"""
         else:
             full_prompt = f"{question}{context}\n\nPlease analyze these {num_frames_to_use} frames from the robot trajectory and provide a clear answer."
         

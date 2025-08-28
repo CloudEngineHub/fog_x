@@ -42,10 +42,11 @@ class Executor:
         Returns:
             Filtered dataset (same type as input)
         """
-        # Check if this is a VLADataset
-        if hasattr(dataset, 'filter') and hasattr(dataset, '_is_loaded'):
-            # Use VLADataset's built-in filter which handles lazy loading
-            logger.info(f"Using VLADataset filter method, is_loaded={dataset._is_loaded}")
+        # Check if this is a VLADataset or DroidDataset
+        if hasattr(dataset, 'filter') and (hasattr(dataset, '_is_loaded') or hasattr(dataset, '_is_downloaded')):
+            # Use dataset's built-in filter which handles lazy loading
+            dataset_type = type(dataset).__name__
+            logger.info(f"Using {dataset_type} filter method")
             return dataset.filter(filter_func)
             
         # Otherwise treat as Ray dataset
@@ -128,9 +129,9 @@ class Executor:
         Returns:
             Transformed dataset (same type as input)
         """
-        # Check if this is a VLADataset
-        if hasattr(dataset, 'map') and hasattr(dataset, '_is_loaded'):
-            # Use VLADataset's built-in map which handles lazy loading
+        # Check if this is a VLADataset or DroidDataset
+        if hasattr(dataset, 'map') and (hasattr(dataset, '_is_loaded') or hasattr(dataset, '_is_downloaded')):
+            # Use dataset's built-in map which handles lazy loading
             return dataset.map(map_func)
             
         # Otherwise treat as Ray dataset

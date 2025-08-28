@@ -45,10 +45,39 @@ The pipeline consists of three main steps:
 
 ### Complete Pipeline (Recommended)
 
-**The easiest way is to use the complete pipeline that handles everything:**
+**The easiest way is to use the complete pipeline with auto-scan:**
 
 ```bash
-# Complete end-to-end pipeline: Download → Convert → Process → Validate
+# Quick mode: Use pre-defined sample trajectories (fastest for testing)
+python droid_hdf5_pipeline.py \
+    --auto-scan --quick-mode \
+    --num-trajectories 3 \
+    --output-dir ./droid_hdf5_results \
+    --question "Is this trajectory successful?" \
+    --max-workers 2
+
+# Full scan: Automatically discover and select from all available trajectories  
+python droid_hdf5_pipeline.py \
+    --auto-scan \
+    --num-trajectories 10 \
+    --output-dir ./droid_hdf5_results \
+    --question "Is this trajectory successful?" \
+    --max-workers 4
+
+# Balanced selection (70% success, 30% failure) with reproducible results
+python droid_hdf5_pipeline.py \
+    --auto-scan --quick-mode \
+    --num-trajectories 20 \
+    --balance 0.7 \
+    --seed 42 \
+    --output-dir ./results \
+    --question "Did the robot complete the task successfully?"
+```
+
+**Legacy manual specification:**
+
+```bash
+# Manual trajectory specification
 python droid_hdf5_pipeline.py \
     --trajectories gs://gresearch/robotics/droid_raw/1.0.1/success/2023-07-21_16-18-07 \
                   gs://gresearch/robotics/droid_raw/1.0.1/failure/2023-07-21_16-27-21 \
