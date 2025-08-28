@@ -1,28 +1,28 @@
-# DROID HDF5 Pipeline: End-to-End Robot Trajectory Processing with VLM
+# DROID Pipeline: End-to-End Robot Trajectory Processing with VLM
 
-This directory contains a complete pipeline for processing robot trajectories with Vision-Language Models (VLMs), from data conversion to validation. The pipeline uses the new HDF5 backend for efficient trajectory storage and parallel processing.
+This directory contains a complete pipeline for processing robot trajectories with Vision-Language Models (VLMs), from data download to validation. The pipeline works directly with DROID raw format and includes automatic ground truth generation.
 
 ## 🎯 Overview
 
-The pipeline consists of three main steps:
-1. **Convert** DROID trajectories from VLA format to HDF5 format
-2. **Process** trajectories with VLM for analysis (success/failure classification, task understanding, etc.)
-3. **Validate** VLM responses against ground truth data
+The pipeline consists of four main steps:
+1. **Download** DROID trajectories from GCS 
+2. **Generate** ground truth labels automatically from trajectory paths
+3. **Process** trajectories with VLM for analysis (success/failure classification)
+4. **Validate** VLM responses against ground truth data with accuracy metrics
 
 ## 📁 Files
 
-- **`droid_hdf5_pipeline.py`** - **⭐ Complete end-to-end pipeline with gsutil download**
-- **`convert_droid_to_hdf5.py`** - Convert DROID VLA files to HDF5 format
+- **`droid_pipeline.py`** - **⭐ Complete end-to-end pipeline** (main entry point)
+- **`scan_all_trajectories.py`** - Generate comprehensive trajectory paths file
 - **`simple_vlm_processing.py`** - Parallel VLM processing with Ray
 - **`validate_vlm_responses.py`** - Validation and metrics calculation
-- **`test_pipeline.py`** - End-to-end pipeline test
 - **`README.md`** - This documentation
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-1. **Install RoboDM with HDF5 support:**
+1. **Install RoboDM:**
    ```bash
    cd /home/syx/ucsf/robodm
    pip install -e .
@@ -30,7 +30,7 @@ The pipeline consists of three main steps:
 
 2. **Install additional dependencies:**
    ```bash
-   pip install ray opencv-python h5py
+   pip install ray opencv-python h5py matplotlib
    ```
 
 3. **Install Google Cloud SDK (for downloading DROID data):**
@@ -43,449 +43,308 @@ The pipeline consists of three main steps:
 
 4. **Ensure VLM service is running** (see [VLM Service Setup](#vlm-service-setup))
 
-### Complete Pipeline (Recommended)
+### ⚡ **Simplest Usage (Recommended)**
 
-**The easiest way is to use the complete pipeline with auto-scan:**
-
-```bash
-# Quick mode: Use pre-defined sample trajectories (fastest for testing)
-python droid_hdf5_pipeline.py \
-    --auto-scan --quick-mode \
-    --num-trajectories 3 \
-    --output-dir ./droid_hdf5_results \
-    --question "Is this trajectory successful?" \
-    --max-workers 2
-
-# Full scan: Automatically discover and select from all available trajectories  
-python droid_hdf5_pipeline.py \
-    --auto-scan \
-    --num-trajectories 10 \
-    --output-dir ./droid_hdf5_results \
-    --question "Is this trajectory successful?" \
-    --max-workers 4
-
-# Balanced selection (70% success, 30% failure) with reproducible results
-python droid_hdf5_pipeline.py \
-    --auto-scan --quick-mode \
-    --num-trajectories 20 \
-    --balance 0.7 \
-    --seed 42 \
-    --output-dir ./results \
-    --question "Did the robot complete the task successfully?"
-```
-
-**Legacy manual specification:**
+The pipeline now works with intelligent defaults - just run:
 
 ```bash
-# Manual trajectory specification
-python droid_hdf5_pipeline.py \
-    --trajectories gs://gresearch/robotics/droid_raw/1.0.1/success/2023-07-21_16-18-07 \
-                  gs://gresearch/robotics/droid_raw/1.0.1/failure/2023-07-21_16-27-21 \
-    --output-dir ./droid_hdf5_results \
-    --question "Is this trajectory successful?" \
-    --max-workers 4
-
-# Use existing HDF5 files (skip download/conversion)
-python droid_hdf5_pipeline.py \
-    --trajectories dummy \
-    --output-dir ./existing_results \
-    --skip-download \
-    --question "Did the robot complete the task successfully?"
+# Process 30 random trajectories with all defaults
+python3 droid_pipeline.py
 ```
 
-### Manual Step-by-Step Process
+This automatically:
+- ✅ Loads from pre-generated trajectory paths file (`results/all_droid_trajectory_paths.txt`)
+- ✅ Selects 30 random trajectories (balanced mix of success/failure)
+- ✅ Downloads trajectories from GCS
+- ✅ Generates ground truth labels automatically
+- ✅ Processes with VLM
+- ✅ Validates results and shows accuracy metrics
+- ✅ Saves all outputs to `./results/`
 
-If you prefer to run each step manually:
-
-#### Step 1: Convert DROID Data to HDF5
+### Custom Usage Examples
 
 ```bash
-# Convert a single trajectory
-python convert_droid_to_hdf5.py \
-    --input /path/to/trajectory.vla \
-    --output /path/to/output/trajectory.h5
+# Different number of trajectories
+python3 droid_pipeline.py --num-trajectories 50
 
-# Convert multiple trajectories
-python convert_droid_to_hdf5.py \
-    --input-dir /path/to/droid/trajectories/ \
-    --output-dir /path/to/hdf5/trajectories/
+# Different output directory
+python3 droid_pipeline.py --output-dir ./my_experiment
+
+# Skip ground truth generation (if you have manual labels)
+python3 droid_pipeline.py --no-generate-ground-truth
+
+# Balance selection (70% success, 30% failure)
+python3 droid_pipeline.py --balance 0.7 --seed 42
+
+# Use auto-scan instead of pre-generated paths
+python3 droid_pipeline.py --auto-scan --num-trajectories 10
+
+# Quick test mode with sample trajectories
+python3 droid_pipeline.py --auto-scan --quick-mode --num-trajectories 3
 ```
 
-#### Step 2: Process Trajectories with VLM
+### 🗂️ One-Time Setup: Generate Trajectory Paths File
+
+For faster repeated runs, first generate a comprehensive paths file:
 
 ```bash
-# Success/failure classification
-python simple_vlm_processing.py \
-    --trajectories /path/to/hdf5/*.h5 \
-    --image-key "observation/images/exterior_image_1_left" \
-    --language-key "metadata/language_instruction" \
-    --question "Is this trajectory successful?" \
-    --output results.json
+# Scan all DROID trajectories and save paths (takes ~10-15 minutes)
+python3 scan_all_trajectories.py --output results/all_droid_trajectory_paths.txt
+
+# This creates a file with ~75,000+ trajectory paths
+# Then you can use the default pipeline which loads from this file instantly
 ```
 
-#### Step 3: Validate Results
+## 🔧 Pipeline Stages
 
-```bash
-# Validate against filename patterns (success_*, failure_*)
-python validate_vlm_responses.py \
-    --results results.json \
-    --ground-truth-source filename \
-    --output validation_results.json \
-    --verbose
+### Stage 1: Trajectory Discovery & Selection
+- **Auto-scan mode**: Scans GCS for all available trajectories
+- **Paths file mode** (default): Loads from pre-generated file for speed
+- **Manual mode**: Use specific trajectory GCS paths
+
+### Stage 2: Download
+- Downloads selected trajectories from GCS using `gsutil`
+- Parallel downloads with progress tracking
+- Automatic retry and error handling
+
+### Stage 3: Ground Truth Generation
+- Automatically extracts success/failure labels from GCS paths
+- Handles lab-specific directory structures
+- Creates validation-ready ground truth JSON
+
+### Stage 4: VLM Processing  
+- Processes trajectories with Vision-Language Model
+- Handles both image-based and state-only trajectories
+- Creates state visualizations when no images available
+- Parallel processing with Ray for scalability
+
+### Stage 5: Validation
+- Compares VLM predictions against ground truth
+- Calculates accuracy, precision, recall, F1 score
+- Provides detailed confusion matrix and per-trajectory results
+
+## 📊 Understanding Results
+
+After running the pipeline, you'll get:
+
+### 1. VLM Results (`vlm_results.json`)
+```json
+{
+  "./results/droid_trajectories/Wed_Jan_3_16:07:12_2024/trajectory.h5": {
+    "trajectory_path": "./results/droid_trajectories/Wed_Jan_3_16:07:12_2024/trajectory.h5",
+    "success": true,
+    "vlm_response": "Yes, this trajectory appears successful. The robot completed the manipulation task with smooth motion and proper gripper control.",
+    "language_instruction": null,
+    "frames_analyzed": 1,
+    "total_frames": 1
+  }
+}
 ```
 
-## 🔧 Detailed Usage
-
-### VLM Processing Options
-
-The `simple_vlm_processing.py` script supports various options:
-
-```bash
-python simple_vlm_processing.py \
-    --trajectories path1.h5 path2.h5 path3.h5 \  # Individual files
-    --trajectories /path/to/trajectories/*.h5 \    # Glob patterns
-    --image-key "observation/images/wrist_camera" \ # Image data key
-    --language-key "metadata/task_description" \   # Language instruction key
-    --question "Did the robot complete the task successfully?" \ # VLM question
-    --output results.json \                        # Save results to file
-    --max-workers 4                               # Parallel workers (optional)
+### 2. Ground Truth (`generated_ground_truth.json`)
+```json
+{
+  "./results/droid_trajectories/Wed_Jan_3_16:07:12_2024": true,
+  "./results/droid_trajectories/Thu_Nov_30_01:00:17_2023": false
+}
 ```
 
-**Common Image Keys for DROID Data:**
-- `observation/images/exterior_image_1_left` - Left exterior camera
-- `observation/images/exterior_image_2_left` - Second left camera
-- `observation/images/wrist_camera` - Wrist-mounted camera (if available)
-
-**Common Language Keys:**
-- `metadata/language_instruction` - Task description
-- `metadata/task_description` - Alternative task description key
-- `instruction` - Simple instruction key
-
-### Validation Options
-
-The validation script supports three ground truth sources:
-
-#### 1. Filename-based Ground Truth
-Works with files named like `success_*.h5` or `failure_*.h5`:
-```bash
-python validate_vlm_responses.py \
-    --results results.json \
-    --ground-truth-source filename
+### 3. Validation Results (`validation_results.json`)
+```json
+{
+  "total_processed": 30,
+  "validated": 30,
+  "skipped": 0,
+  "metrics": {
+    "accuracy": 0.867,
+    "precision": 0.840,
+    "recall": 0.913,
+    "f1": 0.875,
+    "confusion_matrix": {
+      "true_positive": 21,
+      "true_negative": 5,
+      "false_positive": 4,
+      "false_negative": 0
+    }
+  }
+}
 ```
 
-#### 2. Metadata-based Ground Truth
-Uses a field in the trajectory metadata:
-```bash
-python validate_vlm_responses.py \
-    --results results.json \
-    --ground-truth-source metadata \
-    --metadata-key "task_success"
-```
-
-#### 3. Manual Ground Truth
-Uses a JSON file with manual labels:
-```bash
-# Create manual_labels.json:
-# {
-#   "trajectory1.h5": true,
-#   "trajectory2.h5": false,
-#   "trajectory3": true
-# }
-
-python validate_vlm_responses.py \
-    --results results.json \
-    --ground-truth-source manual \
-    --ground-truth-file manual_labels.json
-```
+### 4. Pipeline Summary (`pipeline_summary.json`)
+Complete pipeline execution statistics and timing information.
 
 ## 🏗️ VLM Service Setup
 
 The pipeline requires a VLM service to be running. You can use the RoboDM VLM service:
 
-### Option 1: Local VLM Service
+### Local VLM Service
 ```bash
-# Start the VLM service
+# Start the VLM service (in another terminal)
 cd /home/syx/ucsf/robodm
-python -m robodm.agent.vlm_service --port 8000
+python -m robodm.agent.vlm_service --port 30000
 
-# The service will be available at http://localhost:8000
+# The service will be available at http://localhost:30000
 ```
 
-### Option 2: Remote VLM Service
+### Remote VLM Service
 Update the VLM configuration in `simple_vlm_processing.py`:
 ```python
 tools_config = {
     "tools": {
         "robo2vlm": {
-            "model": "Qwen/Qwen2.5-VL-32B-Instruct",
-            "temperature": 0.1,
-            "max_tokens": 4096,
-            "context_length": 1024,
-            "base_url": "http://your-vlm-server:8000"  # Add this line
+            "model": "Qwen/Qwen2.5-VL-32B-Instruct", 
+            "base_url": "http://your-vlm-server:30000"  # Update this
         }
     }
 }
 ```
 
-## 📊 Understanding Results
+## ⚙️ Advanced Configuration
 
-### VLM Processing Output
-```json
-{
-  "/path/to/trajectory.h5": {
-    "trajectory_path": "/path/to/trajectory.h5",
-    "success": true,
-    "error": null,
-    "vlm_response": "Yes, this trajectory appears to be successful. The robot successfully completed the grasping task.",
-    "language_instruction": "Pick up the red cup",
-    "frames_analyzed": 6,
-    "total_frames": 120
-  }
-}
-```
-
-### Validation Output
-```json
-{
-  "total_processed": 100,
-  "validated": 95,
-  "skipped": 5,
-  "metrics": {
-    "accuracy": 0.895,
-    "precision": 0.912,
-    "recall": 0.876,
-    "f1": 0.894,
-    "confusion_matrix": {
-      "true_positive": 42,
-      "true_negative": 43,
-      "false_positive": 4,
-      "false_negative": 6
-    }
-  }
-}
-```
-
-## ⚠️ Important Notes
-
-### DROID Data Compatibility
-
-Some DROID trajectories may not have image data or may have data compatibility issues:
-
-- **State-only trajectories**: Some DROID trajectories contain only robot state/action data without camera images
-- **SVO format images**: Some trajectories use SVO format instead of MP4, which requires additional processing
-- **Data type issues**: Mixed data types in trajectories may cause loading errors
-
-**✅ Solution**: The pipeline now automatically handles state-only trajectories by creating visualizations from robot state data (actions, joint positions, cartesian position, gripper position).
-
-### Working with State-Only Trajectories
-
-The VLM processing script automatically detects when no images are available and creates state visualizations:
-
+### Custom Questions
 ```bash
-# Pipeline automatically handles state-only trajectories
-python simple_vlm_processing.py \
-    --trajectories /path/to/trajectories/*.h5 \
-    --image-key "observation/images/exterior_image_1_left" \
-    --language-key "metadata/language_instruction" \
-    --question "Is this trajectory successful?"
-```
-
-When no images are found, the system:
-1. Creates 4 visualizations: actions over time, joint positions, cartesian trajectory, and gripper position
-2. Uses these plots as input to the VLM for analysis
-3. Adjusts the VLM prompt to indicate state-based analysis
-
-## 🛠️ Advanced Configuration
-
-### Custom VLM Questions
-Tailor questions to your specific use case:
-
-```bash
-# Success classification
---question "Is this trajectory successful?"
---question "Did the robot complete the task successfully?"
-
-# Quality assessment
---question "Rate the quality of this trajectory from 1-10"
---question "What could be improved in this robot execution?"
-
-# Task understanding
---question "What task is the robot performing?"
---question "Describe what happens in this trajectory"
---question "What objects is the robot interacting with?"
-
-# Failure analysis
---question "If this trajectory failed, what was the cause?"
---question "At what point did the robot encounter difficulties?"
+python3 droid_pipeline.py --question "Did the robot successfully complete the manipulation task?"
+python3 droid_pipeline.py --question "Rate the trajectory quality from 1-10"
+python3 droid_pipeline.py --question "What went wrong in this trajectory?"
 ```
 
 ### Performance Tuning
+```bash
+# More parallel workers
+python3 droid_pipeline.py --max-workers 8
 
-#### Ray Configuration
-```python
-# In simple_vlm_processing.py, modify ray.init():
-ray.init(
-    num_cpus=8,           # Use 8 CPU cores
-    object_store_memory=2_000_000_000  # 2GB object store
-)
+# Different image/language keys  
+python3 droid_pipeline.py \
+    --image-key "observation/images/wrist_camera" \
+    --language-key "metadata/task_description"
 ```
 
-#### Batch Processing
-For large datasets, process in batches:
+### Balanced Dataset Creation
 ```bash
-# Process 100 trajectories at a time
-find /path/to/trajectories -name "*.h5" | head -100 | xargs python simple_vlm_processing.py --trajectories --image-key "..." --language-key "..." --question "..." --output batch1.json
-
-find /path/to/trajectories -name "*.h5" | tail -n +101 | head -100 | xargs python simple_vlm_processing.py --trajectories --image-key "..." --language-key "..." --question "..." --output batch2.json
+# Create balanced dataset with specific success/failure ratio
+python3 droid_pipeline.py \
+    --num-trajectories 100 \
+    --balance 0.6 \  # 60% success, 40% failure
+    --seed 42 \      # Reproducible results
+    --output-dir ./balanced_dataset
 ```
 
-## 🧪 Testing the Pipeline
+## 🧪 Testing
 
-Create a test dataset to verify the pipeline:
+Test the pipeline with a small sample:
 
 ```bash
-# Create test script
-cat > test_pipeline.py << 'EOF'
-#!/usr/bin/env python3
-import tempfile
-import os
-import numpy as np
-from robodm import Trajectory
+# Quick test with 3 trajectories
+python3 droid_pipeline.py --num-trajectories 3 --dry-run
 
-# Create test trajectories
-temp_dir = tempfile.mkdtemp(prefix="pipeline_test_")
-print(f"Creating test data in {temp_dir}")
-
-for i in range(3):
-    success = i < 2  # First 2 are success, last is failure
-    filename = f"{'success' if success else 'failure'}_trajectory_{i}.h5"
-    traj_path = os.path.join(temp_dir, filename)
-    
-    traj = Trajectory(traj_path, mode="w")
-    
-    for t in range(10):
-        # Add random action
-        traj.add("action", np.random.randn(7).astype(np.float32))
-        
-        # Add random image
-        traj.add("observation/images/exterior_image_1_left", 
-                np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8))
-        
-        # Add task instruction
-        if t == 0:
-            task = f"Test task {i}: {'successful' if success else 'failed'} manipulation"
-            traj.add("metadata/language_instruction", task)
-    
-    traj.close()
-    print(f"Created {filename}")
-
-print(f"\nTest trajectories created in: {temp_dir}")
-print(f"\nRun VLM processing:")
-print(f'python simple_vlm_processing.py --trajectories {temp_dir}/*.h5 --image-key "observation/images/exterior_image_1_left" --language-key "metadata/language_instruction" --question "Is this trajectory successful?" --output {temp_dir}/results.json')
-print(f"\nRun validation:")
-print(f'python validate_vlm_responses.py --results {temp_dir}/results.json --ground-truth-source filename --output {temp_dir}/validation.json --verbose')
-EOF
-
-python test_pipeline.py
+# Run actual test
+python3 droid_pipeline.py --num-trajectories 3
 ```
 
 ## 🔍 Troubleshooting
 
 ### Common Issues
 
-#### 1. Missing Keys Error
-```
-Error: Image key 'observation/images/camera1' not found
-```
-**Solution:** Check available keys in your trajectories:
-```python
-from robodm import Trajectory
-traj = Trajectory("path/to/trajectory.h5", mode="r")
-data = traj.load()
-print("Available keys:", list(data.keys()))
-traj.close()
-```
-
-#### 2. VLM Service Connection Error
-```
-Error: Failed to connect to VLM service
-```
-**Solution:** Ensure VLM service is running and accessible:
+#### 1. "No trajectories loaded from paths file"
+**Solution:** Generate the paths file first:
 ```bash
-curl -X POST http://localhost:8000/health
+python3 scan_all_trajectories.py --output results/all_droid_trajectory_paths.txt
 ```
 
-#### 3. Ray Initialization Error
-```
-Error: Ray cluster already running
-```
-**Solution:** Shutdown existing Ray cluster:
+#### 2. "gsutil not found"
+**Solution:** Install Google Cloud SDK:
 ```bash
-ray stop
+curl https://sdk.cloud.google.com | bash
+gcloud init
 ```
 
-#### 4. HDF5 Backend Not Found
+#### 3. "VLM processing failed"
+**Solution:** Ensure VLM service is running:
+```bash
+curl -X GET http://localhost:30000/v1/models
 ```
-Error: Unknown backend 'hdf5'
-```
-**Solution:** Ensure the HDF5 backend is properly installed:
-```python
-from robodm.backend.hdf5_backend import HDF5Backend
-print("HDF5 backend available")
-```
+
+#### 4. "No valid comparisons found"
+This error has been **fixed**! The pipeline now properly matches VLM results with ground truth.
 
 ### Performance Tips
 
-1. **Use appropriate batch sizes** for your hardware
-2. **Monitor memory usage** with Ray dashboard: `ray dashboard`
-3. **Use SSD storage** for trajectory files when possible
-4. **Optimize image resolution** if processing speed is critical
+1. **Use the paths file mode** (default) for faster trajectory selection
+2. **Start with small samples** (`--num-trajectories 5`) for testing  
+3. **Use `--dry-run`** to verify configuration before actual processing
+4. **Monitor Ray dashboard** for distributed processing: `http://localhost:8265`
 
 ## 📈 Scaling Up
 
-### For Large Datasets (1000+ trajectories):
+### For Large Experiments (100+ trajectories):
 
-1. **Use a distributed Ray cluster:**
+```bash
+# Large balanced experiment
+python3 droid_pipeline.py \
+    --num-trajectories 200 \
+    --balance 0.7 \
+    --max-workers 8 \
+    --output-dir ./large_experiment
+
+# Process all trajectories with manual labels  
+python3 droid_pipeline.py \
+    --num-trajectories 1000 \
+    --no-generate-ground-truth \
+    --output-dir ./full_dataset
+```
+
+### Distributed Processing
 ```bash
 # Head node
 ray start --head --port=6379
 
-# Worker nodes  
+# Worker nodes
 ray start --address='head-node-ip:6379'
+
+# Run pipeline with distributed Ray
+python3 droid_pipeline.py --max-workers 16
 ```
 
-2. **Implement checkpointing:**
-```python
-# Save progress periodically
-if len(results) % 100 == 0:
-    with open(f"checkpoint_{len(results)}.json", "w") as f:
-        json.dump(results, f)
-```
+## 🚦 Pipeline Status Indicators
 
-3. **Use data parallelism:**
-```python
-# Split dataset across multiple processes
-dataset_chunks = np.array_split(trajectory_paths, num_workers)
-```
+The pipeline provides clear progress indicators:
+
+- 🎯 **Selected trajectories** - Shows chosen trajectories with success/failure labels
+- 📥 **Download progress** - Real-time download status with ETA
+- 📊 **Ground truth generation** - Automatic labeling statistics  
+- 🤖 **VLM processing** - Processing progress with success/failure counts
+- ✅ **Validation results** - Final accuracy metrics and confusion matrix
 
 ## 🤝 Contributing
 
-To extend this pipeline:
+To extend the pipeline:
 
-1. **Add new VLM models** by modifying the tools configuration
-2. **Implement custom validation metrics** in `validate_vlm_responses.py`
-3. **Add new ground truth sources** by extending the validation functions
-4. **Optimize processing** by implementing custom Ray actors
+1. **Add new validation metrics** in `validate_vlm_responses.py`
+2. **Implement custom trajectory filtering** in `droid_pipeline.py`
+3. **Add new VLM models** by updating the tools configuration
+4. **Create custom ground truth sources** for specialized datasets
 
 ## 📝 Citation
 
 If you use this pipeline in your research, please cite:
 
 ```bibtex
-@software{robodm_hdf5_pipeline,
-  title={RoboDM HDF5 Pipeline: Scalable Robot Trajectory Processing with VLMs},
+@software{droid_vlm_pipeline,
+  title={DROID VLM Pipeline: Scalable Robot Trajectory Analysis},
   author={RoboDM Team},
   year={2024},
   url={https://github.com/robodm/robodm}
 }
 ```
+
+---
+
+## 🎉 **Ready to Use!**
+
+The simplest way to get started:
+
+```bash
+python3 droid_pipeline.py
+```
+
+This will process 30 trajectories end-to-end with automatic ground truth generation and validation! 🚀

@@ -417,24 +417,6 @@ def download_trajectories(
             shutil.rmtree(temp_dir)
 
 
-def create_droid_trajectory_wrapper(droid_path: str) -> str:
-    """
-    Create a path that points directly to the DROID trajectory.h5 file.
-    
-    Args:
-        droid_path: Path to DROID trajectory directory
-        
-    Returns:
-        Path to trajectory.h5 file
-    """
-    # Point directly to the trajectory.h5 file in the DROID directory
-    trajectory_file = os.path.join(droid_path, 'trajectory.h5')
-    
-    if not os.path.exists(trajectory_file):
-        raise FileNotFoundError(f"No trajectory.h5 found in {droid_path}")
-    
-    return trajectory_file
-
 
 def generate_ground_truth_from_paths(trajectory_paths: List[str], output_dir: str) -> str:
     """
@@ -539,16 +521,15 @@ def run_complete_pipeline(
         print("❌ No trajectories were successfully downloaded!")
         return results
     
-    # Stage 2: Create trajectory wrappers for VLM processing
+    # Stage 2: Prepare Trajectories for VLM processing
     print("\n🔗 Stage 2: Prepare Trajectories for VLM Processing")
     print("-" * 50)
     
-    trajectory_files = []
-    for droid_path in successful_paths:
-        wrapper_path = create_droid_trajectory_wrapper(droid_path)
-        trajectory_files.append(wrapper_path)
+    # For VLM processing with MP4 files, we pass the trajectory directories directly
+    # instead of creating HDF5 wrappers
+    trajectory_paths_for_vlm = successful_paths
     
-    print(f"📊 Created {len(trajectory_files)} trajectory wrappers")
+    print(f"📊 Prepared {len(trajectory_paths_for_vlm)} trajectory directories for VLM processing")
     
     # Stage 3: Generate ground truth if requested
     ground_truth_file = None
@@ -564,13 +545,14 @@ def run_complete_pipeline(
     vlm_results_file = os.path.join(output_dir, "vlm_results.json")
     
     try:
-        # Try to use the actual VLM processing
+        # Try to use the actual VLM processing with trajectory directories
         vlm_results = process_trajectories_parallel(
-            trajectory_files,
+            trajectory_paths_for_vlm,
             image_key=image_key,
             language_key=language_key,
             question=question,
-            max_workers=max_workers
+            max_workers=max_workers,
+            output_dir=f"{output_dir}/vlm_detailed_results"
         )
         print(f"✅ VLM processing completed successfully")
     except Exception as e:
@@ -676,8 +658,6 @@ def run_complete_pipeline(
     summary_file = os.path.join(output_dir, "pipeline_summary.json")
     with open(summary_file, 'w') as f:
         json.dump(results, f, indent=2)
-    
-    # Note: trajectory_files now point directly to .h5 files, no cleanup needed
     
     return results
 

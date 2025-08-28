@@ -293,10 +293,15 @@ def validate_vlm_responses(
             skipped_count += 1
             continue
         
-        # Extract VLM prediction
-        vlm_response = result.get("vlm_response", "")
-        question = "question"  # We don't have access to original question here
-        vlm_prediction = extract_vlm_prediction(vlm_response, question)
+        # Extract VLM prediction - prefer pre-computed prediction from VLM results
+        vlm_response = result.get("vlm_response", "")  # Always get VLM response for logging
+        
+        if "vlm_prediction" in result and result["vlm_prediction"] is not None:
+            vlm_prediction = result["vlm_prediction"]
+        else:
+            # Fallback to parsing VLM response if no pre-computed prediction
+            question = "question"  # We don't have access to original question here
+            vlm_prediction = extract_vlm_prediction(vlm_response, question)
         
         if vlm_prediction is None:
             skipped_count += 1
