@@ -318,39 +318,19 @@ def process_single_trajectory(
         else:
             selected_images = list(images)
         
-        # Create image grid for VLM analysis
-        if num_frames_to_use <= 4:
-            # Create 2x2 grid
-            rows = 2
-            cols = 2
-            # Pad with copies if needed
-            while len(selected_images) < 4:
-                selected_images.append(selected_images[-1])
-        else:
-            # Create 2x3 grid
-            rows = 2
-            cols = 3
-            # Pad with copies if needed
-            while len(selected_images) < 6:
-                selected_images.append(selected_images[-1])
-        
-        resized_images = []
+        # Prepare individual frames for VLM analysis
+        processed_frames = []
         for img in selected_images:
             if len(img.shape) == 3:  # RGB image
-                # resized = cv2.resize(img, (target_width, target_height))
-                resized_images.append(img)
+                processed_frames.append(img)
             else:
-                # Handle grayscale or other formats
-                resized_images.append(np.zeros((target_height, target_width, 3), dtype=np.uint8))
-        
-        # Create grid
-        grid_rows = []
-        for r in range(rows):
-            row_images = resized_images[r * cols:(r + 1) * cols]
-            grid_row = np.hstack(row_images)
-            grid_rows.append(grid_row)
-        
-        grid_image = np.vstack(grid_rows)
+                # Handle grayscale or other formats - convert to RGB
+                if len(img.shape) == 2:  # Grayscale
+                    rgb_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                    processed_frames.append(rgb_img)
+                else:
+                    # Default fallback
+                    processed_frames.append(np.zeros((480, 640, 3), dtype=np.uint8))
         
         # Initialize VLM tools
         tools_manager = ToolsManager(config=tools_config)
@@ -358,16 +338,28 @@ def process_single_trajectory(
         # Get the VLM tool
         vlm_tool = tools_manager.get_tool("robo2vlm")
         
-        # Prepare VLM prompt aligned with droid_vlm_demo.py
+        # Prepare VLM prompt for frame-by-frame analysis
         context = f"\nLanguage instruction: '{language_instruction}'" if language_instruction else ""
         traj_name = os.path.splitext(os.path.basename(trajectory_path))[0]
         
+        # Process frames individually and collect responses
+        frame_responses = []
+        for i, frame in enumerate(processed_frames):
+            frame_prompt = f"""This is frame {i+1} of {len(processed_frames)} from a robot trajectory. Analyze what the robot is doing in this frame.{context}"""
+            frame_response = vlm_tool(frame, frame_prompt)
+            frame_responses.append(frame_response)
+            print(f"    📸 Frame {i+1}/{len(processed_frames)} analyzed")
+        
+        # Final analysis prompt combining all frame insights
+        combined_analysis = "\n".join([f"Frame {i+1}: {resp}" for i, resp in enumerate(frame_responses)])
+        final_prompt = f"""Based on the analysis of {len(processed_frames)} individual frames from this robot trajectory, does this trajectory look successful? First answer yes or no, then explain why.
 
-        # Align with droid_vlm_demo.py pattern for image analysis
-        full_prompt = f"""These are {num_frames_to_use} frames from a robot trajectory. Does this trajectory look successful? First answer yes or no, then explain why.{context}"""
-    
-        # Call VLM
-        vlm_response = vlm_tool(grid_image, full_prompt)
+Frame-by-frame analysis:
+{combined_analysis}
+{context}"""
+        
+        # Use the first frame for the final analysis call (the actual analysis is in the prompt)
+        vlm_response = vlm_tool(processed_frames[0], final_prompt)
         
         # Extract success prediction from VLM response (aligned with droid_vlm_demo.py)
         response_lower = vlm_response.lower()
@@ -390,24 +382,29 @@ def process_single_trajectory(
             os.makedirs(output_dir, exist_ok=True)
             results_dir = Path(output_dir)
             
-            # Save input image
-            image_filename = results_dir / f"{traj_name}_input.jpg"
-            cv2.imwrite(str(image_filename), cv2.cvtColor(grid_image, cv2.COLOR_RGB2BGR))
+            # Save individual frames
+            for i, frame in enumerate(processed_frames):
+                frame_filename = results_dir / f"{traj_name}_frame_{i+1}.jpg"
+                cv2.imwrite(str(frame_filename), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
             
             # Save detailed results
             results_filename = results_dir / f"{traj_name}_results.txt"
             with open(results_filename, 'w') as f:
-                f.write(f"VLM Processing Results\n")
-                f.write(f"===================\n")
+                f.write(f"VLM Processing Results (Frame-by-Frame)\n")
+                f.write(f"======================================\n")
                 f.write(f"Trajectory: {traj_name}\n")
                 f.write(f"File path: {trajectory_path}\n")
                 f.write(f"VLM prediction (success): {vlm_prediction}\n")
                 f.write(f"Language instruction: {language_instruction or 'N/A'}\n")
                 f.write(f"Frames analyzed: {num_frames_to_use}/{len(images)}\n")
                 f.write(f"Used state visualization: {use_state_visualization}\n")
-                f.write(f"\nVLM Prompt:\n{full_prompt}\n")
-                f.write(f"\nVLM Response:\n{vlm_response}\n")
-                f.write(f"\nInput image saved as: {traj_name}_input.jpg\n")
+                f.write(f"\n--- Frame-by-Frame Analysis ---\n")
+                for i, frame_resp in enumerate(frame_responses):
+                    f.write(f"\nFrame {i+1} Analysis:\n{frame_resp}\n")
+                f.write(f"\n--- Final Analysis ---\n")
+                f.write(f"Final Prompt:\n{final_prompt}\n")
+                f.write(f"\nFinal VLM Response:\n{vlm_response}\n")
+                f.write(f"\nFrames saved as: {traj_name}_frame_1.jpg to {traj_name}_frame_{len(processed_frames)}.jpg\n")
         
         return {
             "trajectory_path": trajectory_path,
@@ -418,7 +415,9 @@ def process_single_trajectory(
             "language_instruction": language_instruction,
             "frames_analyzed": num_frames_to_use,
             "total_frames": len(images),
-            "used_state_visualization": use_state_visualization
+            "used_state_visualization": use_state_visualization,
+            "frame_responses": frame_responses,
+            "processing_method": "frame_by_frame"
         }
         
     except Exception as e:
@@ -699,7 +698,7 @@ Examples:
         if args.output_dir:
             print(f"\n📁 Detailed results saved to: {args.output_dir}/")
             print(f"   - Individual result files: *_results.txt")
-            print(f"   - Input images: *_input.jpg")
+            print(f"   - Individual frame images: *_frame_N.jpg")
             print(f"   - Processing summary: processing_summary.txt")
         
         return 0

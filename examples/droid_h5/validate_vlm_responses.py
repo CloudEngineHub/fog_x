@@ -260,10 +260,11 @@ def validate_vlm_responses(
     # Process each result
     validated_results = []
     skipped_count = 0
+    failed_processing_count = 0
     
     for trajectory_path, result in results.items():
         if not result["success"]:
-            skipped_count += 1
+            failed_processing_count += 1
             continue
         
         # Extract ground truth
@@ -316,12 +317,14 @@ def validate_vlm_responses(
         })
     
     print(f"✅ Validated: {len(validated_results)}")
-    print(f"⏩ Skipped: {skipped_count}")
+    print(f"❌ Failed processing: {failed_processing_count}")
+    print(f"⏩ Skipped (no ground truth): {skipped_count}")
     
     if len(validated_results) == 0:
         return {
             "error": "No valid comparisons found",
             "total_processed": len(results),
+            "failed_processing": failed_processing_count,
             "skipped": skipped_count
         }
     
@@ -333,6 +336,7 @@ def validate_vlm_responses(
     return {
         "total_processed": len(results),
         "validated": len(validated_results),
+        "failed_processing": failed_processing_count,
         "skipped": skipped_count,
         "metrics": metrics,
         "detailed_results": validated_results
@@ -434,6 +438,7 @@ Examples:
         print("=" * 50)
         print(f"Total trajectories: {validation_results['total_processed']}")
         print(f"Successfully validated: {validation_results['validated']}")
+        print(f"Failed processing: {validation_results['failed_processing']}")
         print(f"Skipped (no ground truth or prediction): {validation_results['skipped']}")
         
         print(f"\n🎯 Accuracy Metrics:")
