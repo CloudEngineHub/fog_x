@@ -466,12 +466,12 @@ def generate_ground_truth_from_paths(trajectory_paths: List[str], output_dir: st
 def run_complete_pipeline(
     trajectory_gcs_paths: List[str],
     output_dir: str,
-    image_key: str = "observation/images/exterior_image_1_left",
     language_key: str = "metadata/language_instruction", 
     question: str = "Is this trajectory successful?",
     max_workers: int = 4,
     skip_download: bool = False,
-    generate_ground_truth: bool = False
+    generate_ground_truth: bool = False,
+    video_path_key: Optional[str] = None
 ) -> Dict:
     """
     Run complete pipeline: download → process → validate.
@@ -548,11 +548,12 @@ def run_complete_pipeline(
         # Try to use the actual VLM processing with trajectory directories
         vlm_results = process_trajectories_parallel(
             trajectory_paths_for_vlm,
-            image_key=image_key,
+            image_key="",  # Not used for DROID directories with video_path_key
             language_key=language_key,
             question=question,
             max_workers=max_workers,
-            output_dir=f"{output_dir}/vlm_detailed_results"
+            output_dir=f"{output_dir}/vlm_detailed_results",
+            video_path_key=video_path_key
         )
         print(f"✅ VLM processing completed successfully")
     except Exception as e:
@@ -737,13 +738,8 @@ Examples:
     )
     parser.add_argument(
         "--output-dir",
-        default="./results",
-        help="Output directory for all pipeline results (default: ./results)"
-    )
-    parser.add_argument(
-        "--image-key",
-        default="observation/images/exterior_image_1_left",
-        help="Key to extract images from trajectories (default: exterior_image_1_left)"
+        default="./output",
+        help="Output directory for all pipeline results (default: ./output)"
     )
     parser.add_argument(
         "--language-key",
@@ -776,6 +772,10 @@ Examples:
         "--dry-run",
         action="store_true",
         help="Show what would be processed without actually running"
+    )
+    parser.add_argument(
+        "--video-path-key",
+        help="Specific video path key from metadata (e.g., 'ext1_mp4_path', 'wrist_mp4_path')"
     )
     
     parser.set_defaults(generate_ground_truth=True)
@@ -856,7 +856,7 @@ Examples:
         for i, path in enumerate(trajectory_paths, 1):
             print(f"  {i}. {path}")
         print(f"Output directory: {args.output_dir}")
-        print(f"Image key: {args.image_key}")
+        print(f"Video path key: {args.video_path_key or 'auto-detect'}")
         print(f"Language key: {args.language_key}")
         print(f"VLM question: {args.question}")
         print(f"Max workers: {args.max_workers}")
@@ -868,12 +868,12 @@ Examples:
         results = run_complete_pipeline(
             trajectory_gcs_paths=trajectory_paths,
             output_dir=args.output_dir,
-            image_key=args.image_key,
             language_key=args.language_key,
             question=args.question,
             max_workers=args.max_workers,
             skip_download=args.skip_download,
-            generate_ground_truth=args.generate_ground_truth
+            generate_ground_truth=args.generate_ground_truth,
+            video_path_key=args.video_path_key
         )
         
         # Check if pipeline was successful

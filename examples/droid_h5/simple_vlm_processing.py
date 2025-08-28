@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import ray
 import time
@@ -90,158 +91,52 @@ def extract_frames_from_mp4(mp4_path: str, max_frames: int = 10) -> List[np.ndar
     return frames
 
 
-def find_video_files_in_trajectory(trajectory_dir: str) -> List[str]:
+def find_video_files_in_trajectory(trajectory_dir: str, video_path_key: str = None) -> List[str]:
     """
     Find MP4 video files in a DROID trajectory directory.
     
     Args:
         trajectory_dir: Path to DROID trajectory directory
+        video_path_key: Specific video path key from metadata (e.g., 'ext1_mp4_path', 'wrist_mp4_path')
         
     Returns:
         List of paths to MP4 video files
     """
-    # Look for MP4 files in recordings/MP4/ directory
-    mp4_pattern = os.path.join(trajectory_dir, "recordings", "MP4", "*.mp4")
-    video_files = glob.glob(mp4_pattern)
+    video_files = []
     
-    # Filter out stereo files (we want the mono camera feeds)
-    mono_files = [f for f in video_files if '-stereo.mp4' not in f]
-    
-    print(f"    📁 Found {len(mono_files)} video files: {[os.path.basename(f) for f in mono_files]}")
-    
-    return mono_files
-
-
-def create_state_visualization(data: Dict[str, np.ndarray]) -> List[np.ndarray]:
-    """
-    Create visualizations from robot state data when no images are available.
-    
-    Args:
-        data: Dictionary containing trajectory data
-        
-    Returns:
-        List of visualization images as numpy arrays
-    """
-    visualizations = []
-    
-    # Get key state data
-    actions = data.get('action', None)
-    joint_positions = data.get('observation/state/joint_positions', None)
-    cartesian_position = data.get('observation/state/cartesian_position', None)
-    gripper_position = data.get('observation/state/gripper_position', None)
-    
-    if actions is None:
-        # No action data available
-        return [np.zeros((224, 224, 3), dtype=np.uint8)]
-    
-    num_timesteps = len(actions)
-    time_steps = np.arange(num_timesteps)
-    
-    # Create 4 different visualizations
-    fig_size = (6, 4)
-    
-    # 1. Action trajectory over time
-    plt.figure(figsize=fig_size)
-    plt.title('Robot Actions Over Time')
-    for i in range(min(actions.shape[1], 6)):  # Plot up to 6 action dimensions
-        plt.plot(time_steps, actions[:, i], label=f'Action {i}', alpha=0.7)
-    plt.xlabel('Time Step')
-    plt.ylabel('Action Value')
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
-    # Convert to numpy array
-    plt.savefig('/tmp/action_plot.png', dpi=100, bbox_inches='tight')
-    plt.close()
-    img = cv2.imread('/tmp/action_plot.png')
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, (224, 224))
-    visualizations.append(img)
-    
-    # 2. Joint positions (if available)
-    if joint_positions is not None:
-        plt.figure(figsize=fig_size)
-        plt.title('Joint Positions Over Time')
-        for i in range(min(joint_positions.shape[1], 7)):
-            plt.plot(time_steps, joint_positions[:, i], label=f'Joint {i}', alpha=0.7)
-        plt.xlabel('Time Step')
-        plt.ylabel('Joint Position (rad)')
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        
-        plt.savefig('/tmp/joint_plot.png', dpi=100, bbox_inches='tight')
-        plt.close()
-        img = cv2.imread('/tmp/joint_plot.png')
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = cv2.resize(img, (224, 224))
-        visualizations.append(img)
-    
-    # 3. Cartesian position trajectory (if available)
-    if cartesian_position is not None:
-        plt.figure(figsize=fig_size)
-        plt.title('Cartesian Position Trajectory')
-        
-        # Plot 3D trajectory
-        if cartesian_position.shape[1] >= 3:
-            # Position trajectory
-            plt.subplot(2, 1, 1)
-            plt.plot(time_steps, cartesian_position[:, 0], label='X', alpha=0.8)
-            plt.plot(time_steps, cartesian_position[:, 1], label='Y', alpha=0.8)
-            plt.plot(time_steps, cartesian_position[:, 2], label='Z', alpha=0.8)
-            plt.ylabel('Position (m)')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
+    if video_path_key:
+        # Use specific video path from metadata
+        metadata_files = list(Path(trajectory_dir).glob("metadata_*.json"))
+        if metadata_files:
+            with open(metadata_files[0], 'r') as f:
+                metadata = json.load(f)
             
-            # Orientation (if available)
-            if cartesian_position.shape[1] >= 6:
-                plt.subplot(2, 1, 2)
-                plt.plot(time_steps, cartesian_position[:, 3], label='Roll', alpha=0.8)
-                plt.plot(time_steps, cartesian_position[:, 4], label='Pitch', alpha=0.8)
-                plt.plot(time_steps, cartesian_position[:, 5], label='Yaw', alpha=0.8)
-                plt.ylabel('Orientation (rad)')
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-        
-        plt.xlabel('Time Step')
-        plt.tight_layout()
-        
-        plt.savefig('/tmp/cartesian_plot.png', dpi=100, bbox_inches='tight')
-        plt.close()
-        img = cv2.imread('/tmp/cartesian_plot.png')
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = cv2.resize(img, (224, 224))
-        visualizations.append(img)
+            if video_path_key in metadata:
+                # The metadata path is relative to GCS root, but we need local path
+                relative_path = metadata[video_path_key]
+                # Extract just the filename part
+                video_filename = os.path.basename(relative_path)
+                local_video_path = os.path.join(trajectory_dir, "recordings", "MP4", video_filename)
+                
+                if os.path.exists(local_video_path):
+                    video_files = [local_video_path]
+                    print(f"    📹 Using specified video: {video_path_key} -> {os.path.basename(local_video_path)}")
+                else:
+                    print(f"    ⚠️ Specified video {video_path_key} not found: {local_video_path}")
+            else:
+                print(f"    ⚠️ Video path key '{video_path_key}' not found in metadata")
     
-    # 4. Gripper position (if available)
-    if gripper_position is not None:
-        plt.figure(figsize=fig_size)
-        plt.title('Gripper Position Over Time')
-        plt.plot(time_steps, gripper_position, 'b-', linewidth=2, label='Gripper Position')
-        plt.xlabel('Time Step')
-        plt.ylabel('Gripper Position')
-        plt.grid(True, alpha=0.3)
-        plt.legend()
+    if not video_files:
+        # Fallback to original logic - find all MP4 files
+        mp4_pattern = os.path.join(trajectory_dir, "recordings", "MP4", "*.mp4")
+        video_files = glob.glob(mp4_pattern)
         
-        # Add horizontal lines for typical open/closed positions
-        plt.axhline(y=0.0, color='r', linestyle='--', alpha=0.5, label='Closed')
-        plt.axhline(y=1.0, color='g', linestyle='--', alpha=0.5, label='Open')
-        plt.legend()
-        plt.tight_layout()
+        # Filter out stereo files (we want the mono camera feeds)
+        video_files = [f for f in video_files if '-stereo.mp4' not in f]
         
-        plt.savefig('/tmp/gripper_plot.png', dpi=100, bbox_inches='tight')
-        plt.close()
-        img = cv2.imread('/tmp/gripper_plot.png')
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = cv2.resize(img, (224, 224))
-        visualizations.append(img)
+        print(f"    📁 Found {len(video_files)} video files: {[os.path.basename(f) for f in video_files]}")
     
-    # Ensure we have at least 4 visualizations by padding with the action plot
-    while len(visualizations) < 4:
-        visualizations.append(visualizations[0])
-    
-    return visualizations
+    return video_files
 
 
 @ray.remote(num_cpus=1)
@@ -251,17 +146,19 @@ def process_single_trajectory(
     language_key: str,
     question: str,
     tools_config: Dict[str, Any],
-    output_dir: Optional[str] = None
+    output_dir: Optional[str] = None,
+    video_path_key: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Process a single trajectory with VLM analysis.
     
     Args:
         trajectory_path: Path to the trajectory file (.h5) or directory (DROID format)
-        image_key: Key to extract image data from trajectory (ignored for DROID MP4 processing)
+        image_key: Key to extract images from trajectory (ignored for DROID directories when video_path_key is specified)
         language_key: Key to extract language instruction from trajectory  
         question: Question to ask the VLM
         tools_config: Configuration for VLM tools
+        video_path_key: Specific video path key from metadata (for DROID directories only)
         
     Returns:
         Dictionary with trajectory analysis results
@@ -284,7 +181,7 @@ def process_single_trajectory(
             print(f"  📁 Processing DROID directory: {os.path.basename(trajectory_path)}")
             
             # Find video files
-            video_files = find_video_files_in_trajectory(trajectory_path)
+            video_files = find_video_files_in_trajectory(trajectory_path, video_path_key)
             
             if video_files:
                 # Use the first video file (typically exterior camera)
@@ -327,11 +224,7 @@ def process_single_trajectory(
                     else:
                         print(f"  ⚠️ Language key '{language_key}' not found in HDF5 file")
                         
-                    # Fall back to state visualization if no images from video
-                    if use_state_visualization:
-                        print(f"  📊 Creating state-based visualization from HDF5 data")
-                        images = create_state_visualization(data)
-                        
+
                 except Exception as e:
                     print(f"  ⚠️ Could not load language instruction from HDF5: {e}")
             
@@ -441,13 +334,11 @@ def process_single_trajectory(
             while len(selected_images) < 6:
                 selected_images.append(selected_images[-1])
         
-        # Resize images to consistent size for grid
-        target_height, target_width = 224, 224
         resized_images = []
         for img in selected_images:
             if len(img.shape) == 3:  # RGB image
-                resized = cv2.resize(img, (target_width, target_height))
-                resized_images.append(resized)
+                # resized = cv2.resize(img, (target_width, target_height))
+                resized_images.append(img)
             else:
                 # Handle grayscale or other formats
                 resized_images.append(np.zeros((target_height, target_width, 3), dtype=np.uint8))
@@ -471,33 +362,10 @@ def process_single_trajectory(
         context = f"\nLanguage instruction: '{language_instruction}'" if language_instruction else ""
         traj_name = os.path.splitext(os.path.basename(trajectory_path))[0]
         
-        if use_state_visualization:
-            # Enhanced prompt for state visualization similar to droid_vlm_demo.py
-            full_prompt = f"""These are {num_frames_to_use} robot state visualizations from a trajectory. Does this trajectory look successful? First answer yes or no, then explain why.
 
-The plots show:
-1. Robot actions over time (control commands)
-2. Joint positions over time (robot arm configuration)  
-3. Cartesian position trajectory (end-effector path)
-4. Gripper position over time (open/close state)
-
-CRITICAL: Smooth-looking trajectories do NOT always mean success! Many robot failures appear smooth but fail to achieve the task goal.
-
-For success classification, look for:
-- SUCCESSFUL: Goal achievement indicators - reaching target positions, completing full task sequence, appropriate final states
-- FAILED: Task incompletion signs - stopping short of targets, incomplete motion sequences, premature endings, suboptimal final positions
-
-Key failure patterns to identify:
-- Trajectories that end prematurely or don't reach intended targets
-- Motion that looks controlled but accomplishes nothing meaningful  
-- Missing expected motion phases (approach, grasp, transport, place)
-- Final gripper/joint positions that suggest incomplete tasks
-
-First answer yes or no, then explain your reasoning based on task completion evidence.{context}"""
-        else:
-            # Align with droid_vlm_demo.py pattern for image analysis
-            full_prompt = f"""These are {num_frames_to_use} frames from a robot trajectory. Does this trajectory look successful? First answer yes or no, then explain why.{context}"""
-        
+        # Align with droid_vlm_demo.py pattern for image analysis
+        full_prompt = f"""These are {num_frames_to_use} frames from a robot trajectory. Does this trajectory look successful? First answer yes or no, then explain why.{context}"""
+    
         # Call VLM
         vlm_response = vlm_tool(grid_image, full_prompt)
         
@@ -573,17 +441,19 @@ def process_trajectories_parallel(
     language_key: str,
     question: str,
     max_workers: Optional[int] = None,
-    output_dir: Optional[str] = None
+    output_dir: Optional[str] = None,
+    video_path_key: Optional[str] = None
 ) -> Dict[str, Dict[str, Any]]:
     """
     Process multiple trajectories in parallel with VLM analysis.
     
     Args:
         trajectory_paths: List of paths to trajectory files
-        image_key: Key to extract image data (e.g., "observation/images/hand_camera")
+        image_key: Key to extract image data (ignored for DROID directories when video_path_key is specified)
         language_key: Key to extract language instruction (e.g., "metadata/language_instruction")
         question: Question to ask the VLM (e.g., "Is this trajectory successful?")
         max_workers: Maximum number of parallel workers (None for automatic)
+        video_path_key: Specific video path key from metadata (for DROID directories only)
         
     Returns:
         Dictionary mapping trajectory paths to analysis results
@@ -625,7 +495,8 @@ def process_trajectories_parallel(
             language_key=language_key,
             question=question,
             tools_config=tools_config,
-            output_dir=output_dir
+            output_dir=output_dir,
+            video_path_key=video_path_key
         )
         futures.append(future)
     
@@ -755,6 +626,10 @@ Examples:
         "--output-dir", 
         help="Output directory for saving detailed results (prompt, input images, VLM responses)"
     )
+    parser.add_argument(
+        "--video-path-key",
+        help="Specific video path key from metadata (e.g., 'ext1_mp4_path', 'wrist_mp4_path')"
+    )
     
     args = parser.parse_args()
     
@@ -795,7 +670,8 @@ Examples:
             language_key=args.language_key,
             question=args.question,
             max_workers=args.max_workers,
-            output_dir=args.output_dir
+            output_dir=args.output_dir,
+            video_path_key=args.video_path_key
         )
         
         # Output results

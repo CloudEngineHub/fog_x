@@ -67,10 +67,15 @@ class DROIDBackend(ContainerBackend):
     - metadata -> metadata/*
     """
 
-    def __init__(self):
-        """Initialize DROID Backend."""
+    def __init__(self, video_path_key: Optional[str] = None):
+        """Initialize DROID Backend.
+        
+        Args:
+            video_path_key: Specific video path key from metadata (e.g., 'ext1_mp4_path', 'wrist_mp4_path')
+        """
         self.path: Optional[str] = None
         self.mode: Optional[str] = None
+        self.video_path_key = video_path_key
         
         # DROID data files
         self.trajectory_h5: Optional[h5py.File] = None
@@ -155,10 +160,25 @@ class DROIDBackend(ContainerBackend):
         # Find MP4 video files
         mp4_dir = os.path.join(self.path, "recordings", "MP4")
         if os.path.exists(mp4_dir):
-            for mp4_file in os.listdir(mp4_dir):
-                if mp4_file.endswith('.mp4'):
-                    camera_serial = mp4_file.replace('.mp4', '')
-                    self.video_files[camera_serial] = os.path.join(mp4_dir, mp4_file)
+            if self.video_path_key and self.metadata and self.video_path_key in self.metadata:
+                # Use specific video path from metadata
+                relative_path = self.metadata[self.video_path_key]
+                video_filename = os.path.basename(relative_path)
+                local_video_path = os.path.join(mp4_dir, video_filename)
+                
+                if os.path.exists(local_video_path):
+                    camera_serial = video_filename.replace('.mp4', '')
+                    self.video_files[camera_serial] = local_video_path
+                    logger.info(f"Using specified video: {self.video_path_key} -> {video_filename}")
+                else:
+                    logger.warning(f"Specified video {self.video_path_key} not found: {local_video_path}")
+            
+            if not self.video_files:
+                # Fallback: load all MP4 files
+                for mp4_file in os.listdir(mp4_dir):
+                    if mp4_file.endswith('.mp4'):
+                        camera_serial = mp4_file.replace('.mp4', '')
+                        self.video_files[camera_serial] = os.path.join(mp4_dir, mp4_file)
         
         logger.info(f"Loaded DROID trajectory with {len(self.video_files)} video files")
         
