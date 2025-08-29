@@ -121,7 +121,7 @@ def main():
     parser.add_argument("--eval-root", default="./eval_runs", help="Root folder for evaluation outputs")
     parser.add_argument("--num-trials", type=int, default=1, help="Number of trials per configuration")
 
-    parser.add_argument("--frame-counts", type=int, nargs='+', default=[4, 8, 16, 32],
+    parser.add_argument("--frame-counts", type=int, nargs='+', default=[2, 4, 6, 8, 10],
                         help="Frame counts to evaluate")
     parser.add_argument("--passing-methods", nargs='+', default=["stream", "concat"],
                         choices=["stream", "concat"], help="Passing methods to evaluate")
