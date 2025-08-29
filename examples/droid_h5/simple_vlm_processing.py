@@ -3,15 +3,13 @@
 Simplified VLM Processing Example
 
 This example provides a simple interface for processing robot trajectories with VLM:
-- Input: List of trajectory paths, image key, language key, question
-- Output: Dictionary mapping trajectory paths to VLM responses
+- Input: List of DROID directories or MP4 files, and a question
+- Output: Dictionary mapping input paths to VLM responses
 - Uses parallel processing via Ray for efficiency
-- Works with both HDF5 and VLA trajectory formats
+- Focuses only on perception data from MP4 videos
 
 Usage:
-    python simple_vlm_processing.py --trajectories path1.h5 path2.h5 path3.vla \
-        --image-key "observation/images/hand_camera" \
-        --language-key "metadata/language_instruction" \
+    python simple_vlm_processing.py --trajectories /path/to/droid_dir1 /path/to/video2.mp4 \
         --question "Is this trajectory successful?"
 """
 
@@ -30,7 +28,6 @@ import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 
-from robodm import Trajectory
 from robodm.agent.tools import ToolsManager
 
 
@@ -137,69 +134,8 @@ def make_image_grid(images: List[np.ndarray], grid_cols: Optional[int] = None, t
     return canvas
 
 def create_state_visualization(data: Dict[str, Any], max_frames: int = 10) -> List[np.ndarray]:
-    """
-    Create visualization images from trajectory state data when no camera images are available.
-    
-    Args:
-        data: Trajectory data dictionary
-        max_frames: Maximum number of visualization frames to create
-        
-    Returns:
-        List of visualization images as numpy arrays
-    """
-    try:
-        # Find state-related keys (joint positions, gripper states, etc.)
-        state_keys = [k for k in data.keys() if any(term in k.lower() for term in 
-                     ['state', 'joint', 'position', 'gripper', 'action', 'pose'])]
-        
-        if not state_keys:
-            print(f"    ⚠️ No state data found for visualization")
-            return []
-        
-        # Use the first available state key
-        state_key = state_keys[0]
-        state_data = data[state_key]
-        
-        print(f"    📊 Creating state visualization from {state_key}")
-        
-        if len(state_data) == 0:
-            return []
-            
-        # Select frames to visualize
-        num_frames = min(max_frames, len(state_data))
-        if len(state_data) > num_frames:
-            indices = np.linspace(0, len(state_data) - 1, num_frames, dtype=int)
-        else:
-            indices = list(range(len(state_data)))
-        
-        # Create simple plot-based visualizations
-        visualizations = []
-        for i, idx in enumerate(indices):
-            fig, ax = plt.subplots(figsize=(8, 6))
-            
-            state_vec = state_data[idx] if hasattr(state_data[idx], '__len__') else [state_data[idx]]
-            
-            # Create a simple bar plot of the state values
-            ax.bar(range(len(state_vec)), state_vec)
-            ax.set_title(f'State at timestep {idx} ({i+1}/{num_frames})')
-            ax.set_xlabel('State dimension')
-            ax.set_ylabel('Value')
-            ax.grid(True)
-            
-            # Convert plot to image
-            fig.canvas.draw()
-            buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-            buf = buf.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-            
-            visualizations.append(buf.copy())
-            plt.close(fig)
-        
-        print(f"    ✅ Created {len(visualizations)} state visualizations")
-        return visualizations
-        
-    except Exception as e:
-        print(f"    ❌ Failed to create state visualization: {e}")
-        return []
+    # State visualization removed to focus purely on MP4 perception
+    return []
 
 
 def find_video_files_in_trajectory(trajectory_dir: str, video_path_key: str = None) -> List[str]:
@@ -268,8 +204,6 @@ def find_video_files_in_trajectory(trajectory_dir: str, video_path_key: str = No
 @ray.remote(num_cpus=1)
 def process_single_trajectory(
     trajectory_path: str,
-    image_key: str,
-    language_key: str,
     question: str,
     tools_config: Dict[str, Any],
     output_dir: Optional[str] = None,
@@ -282,9 +216,7 @@ def process_single_trajectory(
     Process a single trajectory with VLM analysis.
     
     Args:
-        trajectory_path: Path to the trajectory file (.h5) or directory (DROID format)
-        image_key: Key to extract images from trajectory (ignored for DROID directories when video_path_key is specified)
-        language_key: Key to extract language instruction from trajectory  
+        trajectory_path: Path to a DROID directory or an MP4 file
         question: Question to ask the VLM
         tools_config: Configuration for VLM tools
         video_path_key: Specific video path key from metadata (for DROID directories only)
@@ -302,8 +234,7 @@ def process_single_trajectory(
         # Check if this is a DROID directory or trajectory file
         is_droid_directory = os.path.isdir(trajectory_path)
         images = []
-        language_instruction = None
-        use_state_visualization = False
+        
         
         if is_droid_directory:
             # DROID directory format - extract frames from MP4 files
@@ -321,143 +252,27 @@ def process_single_trajectory(
                 images = extract_frames_from_mp4(primary_video, max_frames=max(num_frames, 1))
                 
                 if not images:
-                    print(f"  ⚠️ Failed to extract frames from video, trying HDF5 fallback")
-                    use_state_visualization = True
+                    print(f"  ⚠️ Failed to extract frames from video")
             else:
-                print(f"  ⚠️ No video files found in DROID directory, trying HDF5 fallback")
-                use_state_visualization = True
-                
-                # Try to load images from HDF5 as fallback
-                hdf5_file = os.path.join(trajectory_path, "trajectory.h5")
-                if os.path.exists(hdf5_file):
-                    try:
-                        print(f"  📂 Attempting to load images from HDF5 fallback")
-                        traj = Trajectory(hdf5_file, mode="r")
-                        data = traj.load()
-                        traj.close()
-                        
-                        # Look for any image keys
-                        image_keys = [k for k in data.keys() if 'image' in k.lower()]
-                        if image_keys:
-                            fallback_key = image_keys[0]
-                            images = data[fallback_key]
-                            use_state_visualization = False
-                            print(f"  📷 Found fallback images: {fallback_key} with {len(images)} frames")
-                        
-                    except Exception as hdf5_e:
-                        print(f"  ⚠️ HDF5 fallback also failed: {hdf5_e}")
-                        # Keep use_state_visualization = True
-            
-            # Try to extract language instruction from HDF5 file
-            hdf5_file = os.path.join(trajectory_path, "trajectory.h5")
-            if os.path.exists(hdf5_file):
-                try:
-                    traj = Trajectory(hdf5_file, mode="r")
-                    data = traj.load()
-                    traj.close()
-                    
-                    if language_key in data:
-                        lang_data = data[language_key]
-                        if isinstance(lang_data, np.ndarray):
-                            if lang_data.ndim == 0:
-                                language_instruction = str(lang_data.item())
-                            else:
-                                language_instruction = str(lang_data[0])
-                        else:
-                            language_instruction = str(lang_data)
-                        
-                        # Handle byte strings
-                        if isinstance(language_instruction, str) and language_instruction.startswith("b'"):
-                            language_instruction = language_instruction[2:-1]
-                        
-                        print(f"  📝 Language instruction: '{language_instruction[:50]}...'")
-                    else:
-                        print(f"  ⚠️ Language key '{language_key}' not found in HDF5 file")
-                        
-
-                except Exception as e:
-                    print(f"  ⚠️ Could not load language instruction from HDF5: {e}")
-                    # Continue without language instruction rather than failing completely
+                print(f"  ⚠️ No video files found in DROID directory")
             
         else:
-            # Traditional trajectory file format
-            traj = Trajectory(trajectory_path, mode="r")
-            try:
-                data = traj.load()
-            except Exception as e:
-                print(f"  ❌ Error loading trajectory data: {e}")
-                print(f"  📋 Attempting to load individual streams...")
-                
-                # Try to load streams individually to identify problematic ones
-                streams = traj.backend.get_streams()
-                data = {}
-                problematic_streams = []
-                
-                for stream in streams:
-                    try:
-                        stream_data = traj.backend.read_feature_data(stream.feature_name)
-                        if stream_data is not None:
-                            data[stream.feature_name] = stream_data
-                            print(f"    ✅ Loaded {stream.feature_name}: {stream_data.shape}")
-                        else:
-                            print(f"    ⚠️ No data for {stream.feature_name}")
-                    except Exception as stream_e:
-                        print(f"    ❌ Failed to load {stream.feature_name}: {stream_e}")
-                        problematic_streams.append(stream.feature_name)
-                
-                if problematic_streams:
-                    print(f"  📋 Skipping problematic streams: {problematic_streams}")
-            
-            traj.close()
-            
-            # Extract image data or create visualizations from state data
-            if image_key in data:
-                images = data[image_key]
-                print(f"  📷 Found {len(images)} images with shape {images[0].shape if len(images) > 0 else 'None'}")
+            # Direct MP4 file
+            ext = os.path.splitext(trajectory_path.lower())[1]
+            if ext == ".mp4":
+                print(f"  🎞️ Processing MP4 file: {os.path.basename(trajectory_path)}")
+                images = extract_frames_from_mp4(trajectory_path, max_frames=max(num_frames, 1))
             else:
-                available_image_keys = [k for k in data.keys() if 'image' in k.lower()]
-                if available_image_keys:
-                    print(f"  ⚠️ Image key '{image_key}' not found, but found: {available_image_keys}")
-                    # Use the first available image key
-                    image_key = available_image_keys[0]
-                    images = data[image_key]
-                    print(f"  📷 Using {image_key} with {len(images)} images")
-                else:
-                    # No images available - create state visualization
-                    print(f"  📊 No images found, creating state-based visualization")
-                    use_state_visualization = True
-                    images = create_state_visualization(data)
-            
-            # Extract language instruction
-            if language_key in data:
-                lang_data = data[language_key]
-                if isinstance(lang_data, np.ndarray):
-                    if lang_data.ndim == 0:
-                        # Scalar
-                        language_instruction = str(lang_data.item())
-                    else:
-                        # Array - take first element
-                        language_instruction = str(lang_data[0])
-                else:
-                    language_instruction = str(lang_data)
-                
-                # Handle byte strings
-                if isinstance(language_instruction, str) and language_instruction.startswith("b'"):
-                    language_instruction = language_instruction[2:-1]  # Remove b' and '
-                
-                print(f"  📝 Language instruction: '{language_instruction[:50]}...'")
-            else:
-                available_keys = [k for k in data.keys() if 'language' in k.lower() or 'instruction' in k.lower()]
-                print(f"  ⚠️  Language key '{language_key}' not found. Available keys: {available_keys}")
+                print(f"  ❌ Unsupported input (expected directory or .mp4): {trajectory_path}")
+                images = []
         
         # Prepare images for VLM analysis
         if len(images) == 0:
             return {
                 "trajectory_path": trajectory_path,
                 "success": False,
-                "error": "No images found in trajectory",
-                "vlm_response": None,
-                "language_instruction": language_instruction
+                "error": "No images found in input",
+                "vlm_response": None
             }
         
         # Select representative frames for analysis
@@ -485,19 +300,18 @@ def process_single_trajectory(
         # Get the VLM tool
         vlm_tool = tools_manager.get_tool("robo2vlm")
         
-        context = f"\nLanguage instruction: '{language_instruction}'" if language_instruction else ""
         traj_name = os.path.splitext(os.path.basename(trajectory_path))[0]
 
         frame_responses = []
         if passing_method == "stream":
             # Pass all frames together with a single prompt (no per-frame captioning)
-            final_prompt = f"""These are {len(processed_frames)} evenly sampled frames from a robot trajectory in temporal order. Considering them together, does the trajectory look successful? First answer yes or no, then explain why.{context}"""
+            final_prompt = f"""These are {len(processed_frames)} evenly sampled frames from a robot trajectory in temporal order. Considering them together, does the trajectory look successful? First answer yes or no, then explain why."""
             vlm_response = vlm_tool(processed_frames, final_prompt)
             processing_method_used = "all_frames_stream"
         else:
             # Concatenate frames into a tiled grid and analyze once
             grid_image = make_image_grid(processed_frames, grid_cols=concat_grid_cols)
-            final_prompt = f"""This image is a tiled grid of {len(processed_frames)} evenly sampled frames from a robot trajectory (ordered left-to-right, top-to-bottom). Based on this sequence, does the trajectory look successful? First answer yes or no, then explain why.{context}"""
+            final_prompt = f"""This image is a tiled grid of {len(processed_frames)} evenly sampled frames from a robot trajectory (ordered left-to-right, top-to-bottom). Based on this sequence, does the trajectory look successful? First answer yes or no, then explain why."""
             vlm_response = vlm_tool(grid_image, final_prompt)
             processing_method_used = "concat_grid"
             # Optionally save the grid image
@@ -541,9 +355,7 @@ def process_single_trajectory(
                 f.write(f"Trajectory: {traj_name}\n")
                 f.write(f"File path: {trajectory_path}\n")
                 f.write(f"VLM prediction (success): {vlm_prediction}\n")
-                f.write(f"Language instruction: {language_instruction or 'N/A'}\n")
                 f.write(f"Frames analyzed: {num_frames_to_use}/{len(images)}\n")
-                f.write(f"Used state visualization: {use_state_visualization}\n")
                 if passing_method == 'stream':
                     f.write(f"\n--- Frames Provided ---\n")
                     f.write(f"{len(processed_frames)} frames were analyzed together in one request.\n")
@@ -559,10 +371,8 @@ def process_single_trajectory(
             "error": None,
             "vlm_response": vlm_response,
             "vlm_prediction": vlm_prediction,
-            "language_instruction": language_instruction,
             "frames_analyzed": num_frames_to_use,
             "total_frames": len(images),
-            "used_state_visualization": use_state_visualization,
             "frame_responses": frame_responses,
             "processing_method": processing_method_used,
             "passing_method": passing_method,
@@ -578,15 +388,12 @@ def process_single_trajectory(
             "trajectory_path": trajectory_path,
             "success": False,
             "error": str(e),
-            "vlm_response": None,
-            "language_instruction": None
+            "vlm_response": None
         }
 
 
 def process_trajectories_parallel(
     trajectory_paths: List[str],
-    image_key: str,
-    language_key: str,
     question: str,
     max_workers: Optional[int] = None,
     output_dir: Optional[str] = None,
@@ -599,9 +406,7 @@ def process_trajectories_parallel(
     Process multiple trajectories in parallel with VLM analysis.
     
     Args:
-        trajectory_paths: List of paths to trajectory files
-        image_key: Key to extract image data (ignored for DROID directories when video_path_key is specified)
-        language_key: Key to extract language instruction (e.g., "metadata/language_instruction")
+        trajectory_paths: List of DROID directories or MP4 files
         question: Question to ask the VLM (e.g., "Is this trajectory successful?")
         max_workers: Maximum number of parallel workers (None for automatic)
         video_path_key: Specific video path key from metadata (for DROID directories only)
@@ -628,8 +433,6 @@ def process_trajectories_parallel(
     
     print(f"🚀 Starting parallel processing of {len(trajectory_paths)} trajectories")
     print(f"📊 Configuration:")
-    print(f"   Image key: {image_key}")
-    print(f"   Language key: {language_key}")
     print(f"   Question: {question}")
     if num_frames is not None:
         print(f"   Num frames: {num_frames}")
@@ -645,8 +448,6 @@ def process_trajectories_parallel(
     for traj_path in trajectory_paths:
         future = process_single_trajectory.remote(
             trajectory_path=traj_path,
-            image_key=image_key,
-            language_key=language_key,
             question=question,
             tools_config=tools_config,
             output_dir=output_dir,
@@ -712,8 +513,6 @@ def process_trajectories_parallel(
             f.write(f"Processing time: {total_time:.1f}s\n")
             f.write(f"Processing rate: {len(trajectory_paths)/total_time*60:.1f} trajectories/minute\n")
             f.write(f"\nConfiguration:\n")
-            f.write(f"  Image key: {image_key}\n")
-            f.write(f"  Language key: {language_key}\n")
             f.write(f"  Question: {question}\n")
         print(f"📄 Summary saved to {summary_file}")
     
@@ -727,43 +526,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Basic usage
-    python simple_vlm_processing.py \\
-        --trajectories traj1.h5 traj2.h5 traj3.vla \\
-        --image-key "observation/images/hand_camera" \\
-        --language-key "metadata/language_instruction" \\
+    # Basic usage with DROID directories or MP4s
+    python simple_vlm_processing.py \
+        --trajectories /path/to/droid_dir1 /path/to/video2.mp4 \
         --question "Is this trajectory successful?"
-    
-    # Success/failure classification
-    python simple_vlm_processing.py \\
-        --trajectories /path/to/trajectories/*.h5 \\
-        --image-key "observation/images/wrist_camera" \\
-        --language-key "metadata/task_description" \\
-        --question "Did the robot complete the task successfully?"
-    
-    # Task understanding
-    python simple_vlm_processing.py \\
-        --trajectories data/*.vla \\
-        --image-key "observation/images/main_camera" \\
-        --language-key "instruction" \\
-        --question "What task is the robot performing?"
         """)
     
     parser.add_argument(
         "--trajectories", 
         nargs="+", 
         required=True,
-        help="Paths to trajectory files (.h5, .hdf5, or .vla)"
-    )
-    parser.add_argument(
-        "--image-key", 
-        required=True,
-        help="Key to extract image data (e.g., 'observation/images/hand_camera')"
-    )
-    parser.add_argument(
-        "--language-key", 
-        required=True,
-        help="Key to extract language instruction (e.g., 'metadata/language_instruction')"
+        help="Paths to DROID directories or MP4 files"
     )
     parser.add_argument(
         "--question", 
@@ -817,30 +590,31 @@ Examples:
         else:
             trajectory_paths.append(path_pattern)
     
-    # Filter for valid trajectory files and check existence
+    # Filter for valid inputs and check existence (directories or .mp4)
     valid_paths = []
     for path in trajectory_paths:
         if os.path.exists(path):
-            ext = os.path.splitext(path.lower())[1]
-            if ext in {".h5", ".hdf5", ".vla"}:
+            if os.path.isdir(path):
                 valid_paths.append(path)
             else:
-                print(f"⚠️  Skipping {path}: unsupported format (expected .h5, .hdf5, or .vla)")
+                ext = os.path.splitext(path.lower())[1]
+                if ext == ".mp4":
+                    valid_paths.append(path)
+                else:
+                    print(f"⚠️  Skipping {path}: unsupported format (expected directory or .mp4)")
         else:
             print(f"⚠️  Skipping {path}: file does not exist")
     
     if not valid_paths:
-        print("❌ No valid trajectory files found!")
+        print("❌ No valid inputs found (directories or .mp4)!")
         return 1
     
-    print(f"📂 Found {len(valid_paths)} valid trajectory files")
+    print(f"📂 Found {len(valid_paths)} valid inputs")
     
     # Process trajectories
     try:
         results = process_trajectories_parallel(
             trajectory_paths=valid_paths,
-            image_key=args.image_key,
-            language_key=args.language_key,
             question=args.question,
             max_workers=args.max_workers,
             output_dir=args.output_dir,
@@ -862,12 +636,9 @@ Examples:
             for path, result in results.items():
                 print(f"\n🗂️  {os.path.basename(path)}:")
                 if result["success"]:
-                    print(f"   📝 Instruction: {result.get('language_instruction', 'N/A')}")
                     print(f"   🎯 VLM Prediction: {'Success' if result.get('vlm_prediction', False) else 'Failure'}")
                     print(f"   🤖 VLM Response: {result['vlm_response'][:200]}...")
                     print(f"   📊 Frames: {result.get('frames_analyzed', 0)}/{result.get('total_frames', 0)}")
-                    if result.get('used_state_visualization', False):
-                        print(f"   📈 Used state visualization (no camera images available)")
                 else:
                     print(f"   ❌ Error: {result['error']}")
         

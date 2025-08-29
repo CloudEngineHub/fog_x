@@ -548,8 +548,6 @@ def run_complete_pipeline(
         # Try to use the actual VLM processing with trajectory directories
         vlm_results = process_trajectories_parallel(
             trajectory_paths_for_vlm,
-            image_key="",  # Not used for DROID directories with video_path_key
-            language_key=language_key,
             question=question,
             max_workers=max_workers,
             output_dir=f"{output_dir}/vlm_detailed_results",

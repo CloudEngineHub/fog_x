@@ -119,6 +119,7 @@ def main():
     parser.add_argument("--seed", type=int, help="Random seed")
     parser.add_argument("--max-workers", type=int, default=4, help="Parallel workers for VLM")
     parser.add_argument("--eval-root", default="./eval_runs", help="Root folder for evaluation outputs")
+    parser.add_argument("--num-trials", type=int, default=1, help="Number of trials per configuration")
 
     parser.add_argument("--frame-counts", type=int, nargs='+', default=[4, 8, 16, 32],
                         help="Frame counts to evaluate")
@@ -187,50 +188,133 @@ def main():
         run_out_dir = runs_root / run_name
         os.makedirs(run_out_dir, exist_ok=True)
 
-        print(f"\n🚀 Run: {run_name}")
-        results = process_trajectories_parallel(
-            trajectory_paths=successful_local_paths,
-            image_key="",  # not used for DROID directories when MP4s present
-            language_key=args.language_key,
-            question=args.question,
-            max_workers=args.max_workers,
-            output_dir=str(run_out_dir),
-            video_path_key=cam_key,
-            num_frames=n,
-            passing_method=method,
-            concat_grid_cols=None
-        )
+        per_trial_metrics = []
 
-        # Persist raw results
-        with open(run_out_dir / "vlm_results.json", 'w') as f:
-            json.dump(results, f, indent=2)
+        for trial_idx in range(max(1, int(args.num_trials))):
+            trial_num = trial_idx + 1
+            trial_dir = run_out_dir / f"trial_{trial_num:02d}"
+            os.makedirs(trial_dir, exist_ok=True)
 
-        total, predicted, correct, acc = compute_accuracy(results, gt_by_name)
-        print(f"📈 Accuracy: {acc:.3f} ({correct}/{predicted}) | total {total}")
+            print(f"\n🚀 Run: {run_name} [trial {trial_num}/{args.num_trials}]")
+            results = process_trajectories_parallel(
+                trajectory_paths=successful_local_paths,
+                question=args.question,
+                max_workers=args.max_workers,
+                output_dir=str(trial_dir),
+                video_path_key=cam_key,
+                num_frames=n,
+                passing_method=method,
+                concat_grid_cols=None
+            )
 
-        # Save metrics per run
+            # Persist raw results per trial
+            with open(trial_dir / "vlm_results.json", 'w') as f:
+                json.dump(results, f, indent=2)
+
+            total, predicted, correct, acc = compute_accuracy(results, gt_by_name)
+            print(f"📈 Trial {trial_num} accuracy: {acc:.3f} ({correct}/{predicted}) | total {total}")
+
+            # Save per-trial metrics
+            with open(trial_dir / "metrics.csv", 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["method", "frames", "camera_key", "trial", "total", "predicted", "correct", "accuracy"])
+                writer.writerow([method, n, cam_key or "auto", trial_num, total, predicted, correct, f"{acc:.6f}"])
+
+            per_trial_metrics.append({
+                "trial": trial_num,
+                "total": total,
+                "predicted": predicted,
+                "correct": correct,
+                "accuracy": acc,
+                "run_dir": str(trial_dir)
+            })
+
+            # Also add to overall summary (per-trial row)
+            summary_rows.append({
+                "method": method,
+                "frames": n,
+                "camera_key": cam_key or "auto",
+                "trial": trial_num,
+                "total": total,
+                "predicted": predicted,
+                "correct": correct,
+                "accuracy": acc,
+                "is_aggregate": False,
+                "num_trials": int(args.num_trials),
+                "accuracy_mean": None,
+                "accuracy_variance": None,
+                "run_dir": str(trial_dir)
+            })
+
+        # Aggregate across trials
+        accuracies = [m["accuracy"] for m in per_trial_metrics]
+        if len(accuracies) > 1:
+            mean_acc = float(np.mean(accuracies))
+            var_acc = float(np.var(accuracies, ddof=1))
+        else:
+            mean_acc = float(accuracies[0]) if accuracies else 0.0
+            var_acc = 0.0
+
+        print(f"📊 Aggregate over {len(accuracies)} trial(s): mean={mean_acc:.3f}, var={var_acc:.6f}")
+
+        # Persist aggregate metrics JSON at config root
+        aggregate_payload = {
+            "method": method,
+            "frames": n,
+            "camera_key": cam_key or "auto",
+            "num_trials": int(args.num_trials),
+            "per_trial": per_trial_metrics,
+            "accuracy_mean": mean_acc,
+            "accuracy_variance": var_acc,
+        }
+        with open(run_out_dir / "aggregate_metrics.json", 'w') as f:
+            json.dump(aggregate_payload, f, indent=2)
+
+        # Write combined metrics (per-trial rows + aggregate row) at config root
         with open(run_out_dir / "metrics.csv", 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(["method", "frames", "camera_key", "total", "predicted", "correct", "accuracy"])
-            writer.writerow([method, n, cam_key or "auto", total, predicted, correct, f"{acc:.6f}"])
+            writer.writerow(["method", "frames", "camera_key", "trial", "total", "predicted", "correct", "accuracy", "is_aggregate", "num_trials", "accuracy_mean", "accuracy_variance"])
+            for m in per_trial_metrics:
+                writer.writerow([method, n, cam_key or "auto", m["trial"], m["total"], m["predicted"], m["correct"], f"{m['accuracy']:.6f}", 0, int(args.num_trials), "", ""]) 
+            writer.writerow([method, n, cam_key or "auto", "all", "", "", "", f"{mean_acc:.6f}", 1, int(args.num_trials), f"{mean_acc:.6f}", f"{var_acc:.6f}"])
 
+        # Add aggregate row to overall summary
         summary_rows.append({
             "method": method,
             "frames": n,
             "camera_key": cam_key or "auto",
-            "total": total,
-            "predicted": predicted,
-            "correct": correct,
-            "accuracy": acc,
+            "trial": "all",
+            "total": None,
+            "predicted": None,
+            "correct": None,
+            "accuracy": mean_acc,
+            "is_aggregate": True,
+            "num_trials": int(args.num_trials),
+            "accuracy_mean": mean_acc,
+            "accuracy_variance": var_acc,
             "run_dir": str(run_out_dir)
         })
 
     # Write overall summary
     with open(eval_root / "summary.csv", 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["method", "frames", "camera_key", "total", "predicted", "correct", "accuracy", "run_dir"])
+        writer.writerow(["method", "frames", "camera_key", "trial", "total", "predicted", "correct", "accuracy", "is_aggregate", "num_trials", "accuracy_mean", "accuracy_variance", "run_dir"])
         for r in summary_rows:
-            writer.writerow([r["method"], r["frames"], r["camera_key"], r["total"], r["predicted"], r["correct"], f"{r['accuracy']:.6f}", r["run_dir"]])
+            writer.writerow([
+                r["method"],
+                r["frames"],
+                r["camera_key"],
+                r.get("trial", ""),
+                r.get("total", ""),
+                r.get("predicted", ""),
+                r.get("correct", ""),
+                f"{r['accuracy']:.6f}",
+                int(bool(r.get("is_aggregate", False))),
+                r.get("num_trials", ""),
+                f"{r['accuracy_mean']:.6f}" if r.get("accuracy_mean") is not None else "",
+                f"{r['accuracy_variance']:.6f}" if r.get("accuracy_variance") is not None else "",
+                r["run_dir"],
+            ])
 
     elapsed = time.time() - start_all
     print(f"\n🎉 Evaluation complete in {elapsed/60:.1f} minutes")
