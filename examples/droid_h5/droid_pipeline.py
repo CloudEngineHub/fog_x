@@ -713,7 +713,7 @@ Examples:
     parser.add_argument(
         "--num-trajectories",
         type=int,
-        default=30,
+        default=100,
         help="Number of trajectories to randomly select (default: 30)"
     )
     parser.add_argument(

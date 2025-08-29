@@ -91,6 +91,72 @@ def extract_frames_from_mp4(mp4_path: str, max_frames: int = 10) -> List[np.ndar
     return frames
 
 
+def create_state_visualization(data: Dict[str, Any], max_frames: int = 10) -> List[np.ndarray]:
+    """
+    Create visualization images from trajectory state data when no camera images are available.
+    
+    Args:
+        data: Trajectory data dictionary
+        max_frames: Maximum number of visualization frames to create
+        
+    Returns:
+        List of visualization images as numpy arrays
+    """
+    try:
+        # Find state-related keys (joint positions, gripper states, etc.)
+        state_keys = [k for k in data.keys() if any(term in k.lower() for term in 
+                     ['state', 'joint', 'position', 'gripper', 'action', 'pose'])]
+        
+        if not state_keys:
+            print(f"    ⚠️ No state data found for visualization")
+            return []
+        
+        # Use the first available state key
+        state_key = state_keys[0]
+        state_data = data[state_key]
+        
+        print(f"    📊 Creating state visualization from {state_key}")
+        
+        if len(state_data) == 0:
+            return []
+            
+        # Select frames to visualize
+        num_frames = min(max_frames, len(state_data))
+        if len(state_data) > num_frames:
+            indices = np.linspace(0, len(state_data) - 1, num_frames, dtype=int)
+        else:
+            indices = list(range(len(state_data)))
+        
+        # Create simple plot-based visualizations
+        visualizations = []
+        for i, idx in enumerate(indices):
+            fig, ax = plt.subplots(figsize=(8, 6))
+            
+            state_vec = state_data[idx] if hasattr(state_data[idx], '__len__') else [state_data[idx]]
+            
+            # Create a simple bar plot of the state values
+            ax.bar(range(len(state_vec)), state_vec)
+            ax.set_title(f'State at timestep {idx} ({i+1}/{num_frames})')
+            ax.set_xlabel('State dimension')
+            ax.set_ylabel('Value')
+            ax.grid(True)
+            
+            # Convert plot to image
+            fig.canvas.draw()
+            buf = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+            buf = buf.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            
+            visualizations.append(buf.copy())
+            plt.close(fig)
+        
+        print(f"    ✅ Created {len(visualizations)} state visualizations")
+        return visualizations
+        
+    except Exception as e:
+        print(f"    ❌ Failed to create state visualization: {e}")
+        return []
+
+
 def find_video_files_in_trajectory(trajectory_dir: str, video_path_key: str = None) -> List[str]:
     """
     Find MP4 video files in a DROID trajectory directory.
@@ -128,13 +194,28 @@ def find_video_files_in_trajectory(trajectory_dir: str, video_path_key: str = No
     
     if not video_files:
         # Fallback to original logic - find all MP4 files
-        mp4_pattern = os.path.join(trajectory_dir, "recordings", "MP4", "*.mp4")
-        video_files = glob.glob(mp4_pattern)
+        # Try multiple potential directories
+        potential_dirs = [
+            os.path.join(trajectory_dir, "recordings", "MP4"),
+            os.path.join(trajectory_dir, "recordings"),
+            trajectory_dir
+        ]
         
-        # Filter out stereo files (we want the mono camera feeds)
-        video_files = [f for f in video_files if '-stereo.mp4' not in f]
+        for search_dir in potential_dirs:
+            if os.path.exists(search_dir):
+                mp4_pattern = os.path.join(search_dir, "*.mp4")
+                found_files = glob.glob(mp4_pattern)
+                
+                # Filter out stereo files (we want the mono camera feeds)
+                found_files = [f for f in found_files if '-stereo.mp4' not in f]
+                
+                if found_files:
+                    video_files = found_files
+                    print(f"    📁 Found {len(video_files)} video files in {search_dir}: {[os.path.basename(f) for f in video_files]}")
+                    break
         
-        print(f"    📁 Found {len(video_files)} video files: {[os.path.basename(f) for f in video_files]}")
+        if not video_files:
+            print(f"    ⚠️ No video files found in any potential directory")
     
     return video_files
 
@@ -192,11 +273,32 @@ def process_single_trajectory(
                 images = extract_frames_from_mp4(primary_video, max_frames=10)
                 
                 if not images:
-                    print(f"  ⚠️ Failed to extract frames from video, falling back to state visualization")
+                    print(f"  ⚠️ Failed to extract frames from video, trying HDF5 fallback")
                     use_state_visualization = True
             else:
-                print(f"  ⚠️ No video files found in DROID directory")
+                print(f"  ⚠️ No video files found in DROID directory, trying HDF5 fallback")
                 use_state_visualization = True
+                
+                # Try to load images from HDF5 as fallback
+                hdf5_file = os.path.join(trajectory_path, "trajectory.h5")
+                if os.path.exists(hdf5_file):
+                    try:
+                        print(f"  📂 Attempting to load images from HDF5 fallback")
+                        traj = Trajectory(hdf5_file, mode="r")
+                        data = traj.load()
+                        traj.close()
+                        
+                        # Look for any image keys
+                        image_keys = [k for k in data.keys() if 'image' in k.lower()]
+                        if image_keys:
+                            fallback_key = image_keys[0]
+                            images = data[fallback_key]
+                            use_state_visualization = False
+                            print(f"  📷 Found fallback images: {fallback_key} with {len(images)} frames")
+                        
+                    except Exception as hdf5_e:
+                        print(f"  ⚠️ HDF5 fallback also failed: {hdf5_e}")
+                        # Keep use_state_visualization = True
             
             # Try to extract language instruction from HDF5 file
             hdf5_file = os.path.join(trajectory_path, "trajectory.h5")
@@ -227,6 +329,7 @@ def process_single_trajectory(
 
                 except Exception as e:
                     print(f"  ⚠️ Could not load language instruction from HDF5: {e}")
+                    # Continue without language instruction rather than failing completely
             
         else:
             # Traditional trajectory file format
