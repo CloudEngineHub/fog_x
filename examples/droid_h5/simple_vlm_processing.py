@@ -91,6 +91,51 @@ def extract_frames_from_mp4(mp4_path: str, max_frames: int = 10) -> List[np.ndar
     return frames
 
 
+def make_image_grid(images: List[np.ndarray], grid_cols: Optional[int] = None, target_size: Optional[tuple] = None) -> np.ndarray:
+    """
+    Create a tiled grid image from a list of RGB images.
+    Images are resized to a common size and arranged row-wise.
+    """
+    if not images:
+        return np.zeros((480, 640, 3), dtype=np.uint8)
+
+    # Determine grid columns
+    num_images = len(images)
+    if grid_cols is None or grid_cols <= 0:
+        grid_cols = int(np.ceil(np.sqrt(num_images)))
+    grid_rows = int(np.ceil(num_images / grid_cols))
+
+    # Determine target size
+    if target_size is None:
+        # Use median size to reduce distortion
+        heights = [img.shape[0] for img in images if len(img.shape) == 3]
+        widths = [img.shape[1] for img in images if len(img.shape) == 3]
+        h = int(np.median(heights)) if heights else 480
+        w = int(np.median(widths)) if widths else 640
+        target_size = (w, h)
+
+    # Resize all images
+    resized = []
+    for img in images:
+        if len(img.shape) == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        resized.append(cv2.resize(img, target_size))
+
+    # Create grid canvas
+    grid_h = target_size[1] * grid_rows
+    grid_w = target_size[0] * grid_cols
+    canvas = np.zeros((grid_h, grid_w, 3), dtype=np.uint8)
+
+    # Paste images
+    for idx, img in enumerate(resized):
+        r = idx // grid_cols
+        c = idx % grid_cols
+        y0 = r * target_size[1]
+        x0 = c * target_size[0]
+        canvas[y0:y0 + target_size[1], x0:x0 + target_size[0], :] = img
+
+    return canvas
+
 def create_state_visualization(data: Dict[str, Any], max_frames: int = 10) -> List[np.ndarray]:
     """
     Create visualization images from trajectory state data when no camera images are available.
@@ -228,7 +273,10 @@ def process_single_trajectory(
     question: str,
     tools_config: Dict[str, Any],
     output_dir: Optional[str] = None,
-    video_path_key: Optional[str] = None
+    video_path_key: Optional[str] = None,
+    num_frames: int = 6,
+    passing_method: str = "stream",
+    concat_grid_cols: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Process a single trajectory with VLM analysis.
@@ -270,7 +318,7 @@ def process_single_trajectory(
                 print(f"  📹 Using primary video: {os.path.basename(primary_video)}")
                 
                 # Extract frames from the video
-                images = extract_frames_from_mp4(primary_video, max_frames=10)
+                images = extract_frames_from_mp4(primary_video, max_frames=max(num_frames, 1))
                 
                 if not images:
                     print(f"  ⚠️ Failed to extract frames from video, trying HDF5 fallback")
@@ -413,7 +461,7 @@ def process_single_trajectory(
             }
         
         # Select representative frames for analysis
-        num_frames_to_use = min(6, len(images))
+        num_frames_to_use = min(max(num_frames, 1), len(images))
         if len(images) > num_frames_to_use:
             # Select frames evenly distributed throughout trajectory
             indices = np.linspace(0, len(images) - 1, num_frames_to_use, dtype=int)
@@ -421,48 +469,42 @@ def process_single_trajectory(
         else:
             selected_images = list(images)
         
-        # Prepare individual frames for VLM analysis
+        # Prepare frames for VLM analysis
         processed_frames = []
         for img in selected_images:
-            if len(img.shape) == 3:  # RGB image
+            if len(img.shape) == 3:
                 processed_frames.append(img)
+            elif len(img.shape) == 2:
+                processed_frames.append(cv2.cvtColor(img, cv2.COLOR_GRAY2RGB))
             else:
-                # Handle grayscale or other formats - convert to RGB
-                if len(img.shape) == 2:  # Grayscale
-                    rgb_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-                    processed_frames.append(rgb_img)
-                else:
-                    # Default fallback
-                    processed_frames.append(np.zeros((480, 640, 3), dtype=np.uint8))
-        
+                processed_frames.append(np.zeros((480, 640, 3), dtype=np.uint8))
+
         # Initialize VLM tools
         tools_manager = ToolsManager(config=tools_config)
         
         # Get the VLM tool
         vlm_tool = tools_manager.get_tool("robo2vlm")
         
-        # Prepare VLM prompt for frame-by-frame analysis
         context = f"\nLanguage instruction: '{language_instruction}'" if language_instruction else ""
         traj_name = os.path.splitext(os.path.basename(trajectory_path))[0]
-        
-        # Process frames individually and collect responses
-        frame_responses = []
-        for i, frame in enumerate(processed_frames):
-            frame_prompt = f"""This is frame {i+1} of {len(processed_frames)} from a robot trajectory. Analyze what the robot is doing in this frame.{context}"""
-            frame_response = vlm_tool(frame, frame_prompt)
-            frame_responses.append(frame_response)
-            print(f"    📸 Frame {i+1}/{len(processed_frames)} analyzed")
-        
-        # Final analysis prompt combining all frame insights
-        combined_analysis = "\n".join([f"Frame {i+1}: {resp}" for i, resp in enumerate(frame_responses)])
-        final_prompt = f"""Based on the analysis of {len(processed_frames)} individual frames from this robot trajectory, does this trajectory look successful? First answer yes or no, then explain why.
 
-Frame-by-frame analysis:
-{combined_analysis}
-{context}"""
-        
-        # Use the first frame for the final analysis call (the actual analysis is in the prompt)
-        vlm_response = vlm_tool(processed_frames[0], final_prompt)
+        frame_responses = []
+        if passing_method == "stream":
+            # Pass all frames together with a single prompt (no per-frame captioning)
+            final_prompt = f"""These are {len(processed_frames)} evenly sampled frames from a robot trajectory in temporal order. Considering them together, does the trajectory look successful? First answer yes or no, then explain why.{context}"""
+            vlm_response = vlm_tool(processed_frames, final_prompt)
+            processing_method_used = "all_frames_stream"
+        else:
+            # Concatenate frames into a tiled grid and analyze once
+            grid_image = make_image_grid(processed_frames, grid_cols=concat_grid_cols)
+            final_prompt = f"""This image is a tiled grid of {len(processed_frames)} evenly sampled frames from a robot trajectory (ordered left-to-right, top-to-bottom). Based on this sequence, does the trajectory look successful? First answer yes or no, then explain why.{context}"""
+            vlm_response = vlm_tool(grid_image, final_prompt)
+            processing_method_used = "concat_grid"
+            # Optionally save the grid image
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                grid_path = Path(output_dir) / f"{traj_name}_grid.jpg"
+                cv2.imwrite(str(grid_path), cv2.cvtColor(grid_image, cv2.COLOR_RGB2BGR))
         
         # Extract success prediction from VLM response (aligned with droid_vlm_demo.py)
         response_lower = vlm_response.lower()
@@ -485,15 +527,16 @@ Frame-by-frame analysis:
             os.makedirs(output_dir, exist_ok=True)
             results_dir = Path(output_dir)
             
-            # Save individual frames
-            for i, frame in enumerate(processed_frames):
-                frame_filename = results_dir / f"{traj_name}_frame_{i+1}.jpg"
-                cv2.imwrite(str(frame_filename), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            # Save individual frames for inspection (stream mode passes all frames together)
+            if passing_method == "stream":
+                for i, frame in enumerate(processed_frames):
+                    frame_filename = results_dir / f"{traj_name}_frame_{i+1}.jpg"
+                    cv2.imwrite(str(frame_filename), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
             
             # Save detailed results
             results_filename = results_dir / f"{traj_name}_results.txt"
             with open(results_filename, 'w') as f:
-                f.write(f"VLM Processing Results (Frame-by-Frame)\n")
+                f.write(f"VLM Processing Results ({'Frame-by-Frame' if passing_method=='stream' else 'Concat Grid'})\n")
                 f.write(f"======================================\n")
                 f.write(f"Trajectory: {traj_name}\n")
                 f.write(f"File path: {trajectory_path}\n")
@@ -501,13 +544,14 @@ Frame-by-frame analysis:
                 f.write(f"Language instruction: {language_instruction or 'N/A'}\n")
                 f.write(f"Frames analyzed: {num_frames_to_use}/{len(images)}\n")
                 f.write(f"Used state visualization: {use_state_visualization}\n")
-                f.write(f"\n--- Frame-by-Frame Analysis ---\n")
-                for i, frame_resp in enumerate(frame_responses):
-                    f.write(f"\nFrame {i+1} Analysis:\n{frame_resp}\n")
+                if passing_method == 'stream':
+                    f.write(f"\n--- Frames Provided ---\n")
+                    f.write(f"{len(processed_frames)} frames were analyzed together in one request.\n")
                 f.write(f"\n--- Final Analysis ---\n")
                 f.write(f"Final Prompt:\n{final_prompt}\n")
                 f.write(f"\nFinal VLM Response:\n{vlm_response}\n")
-                f.write(f"\nFrames saved as: {traj_name}_frame_1.jpg to {traj_name}_frame_{len(processed_frames)}.jpg\n")
+                if passing_method == 'stream':
+                    f.write(f"\nFrames saved as: {traj_name}_frame_1.jpg to {traj_name}_frame_{len(processed_frames)}.jpg\n")
         
         return {
             "trajectory_path": trajectory_path,
@@ -520,7 +564,9 @@ Frame-by-frame analysis:
             "total_frames": len(images),
             "used_state_visualization": use_state_visualization,
             "frame_responses": frame_responses,
-            "processing_method": "frame_by_frame"
+            "processing_method": processing_method_used,
+            "passing_method": passing_method,
+            "num_frames": num_frames_to_use
         }
         
     except Exception as e:
@@ -544,7 +590,10 @@ def process_trajectories_parallel(
     question: str,
     max_workers: Optional[int] = None,
     output_dir: Optional[str] = None,
-    video_path_key: Optional[str] = None
+    video_path_key: Optional[str] = None,
+    num_frames: Optional[int] = None,
+    passing_method: str = "stream",
+    concat_grid_cols: Optional[int] = None
 ) -> Dict[str, Dict[str, Any]]:
     """
     Process multiple trajectories in parallel with VLM analysis.
@@ -582,6 +631,9 @@ def process_trajectories_parallel(
     print(f"   Image key: {image_key}")
     print(f"   Language key: {language_key}")
     print(f"   Question: {question}")
+    if num_frames is not None:
+        print(f"   Num frames: {num_frames}")
+    print(f"   Passing method: {passing_method}")
     
     # Create output directory if specified
     if output_dir:
@@ -598,7 +650,10 @@ def process_trajectories_parallel(
             question=question,
             tools_config=tools_config,
             output_dir=output_dir,
-            video_path_key=video_path_key
+            video_path_key=video_path_key,
+            num_frames=(num_frames if num_frames is not None else 6),
+            passing_method=passing_method,
+            concat_grid_cols=concat_grid_cols
         )
         futures.append(future)
     
@@ -732,6 +787,22 @@ Examples:
         "--video-path-key",
         help="Specific video path key from metadata (e.g., 'ext1_mp4_path', 'wrist_mp4_path')"
     )
+    parser.add_argument(
+        "--num-frames",
+        type=int,
+        help="Number of evenly sampled frames to use (default: 6)"
+    )
+    parser.add_argument(
+        "--passing-method",
+        choices=["stream", "concat"],
+        default="stream",
+        help="How to pass images to VLM: per-frame ('stream') or tiled grid ('concat')"
+    )
+    parser.add_argument(
+        "--concat-grid-cols",
+        type=int,
+        help="Number of columns for concatenated grid (concat mode). Default sqrt(N)."
+    )
     
     args = parser.parse_args()
     
@@ -773,7 +844,10 @@ Examples:
             question=args.question,
             max_workers=args.max_workers,
             output_dir=args.output_dir,
-            video_path_key=args.video_path_key
+            video_path_key=args.video_path_key,
+            num_frames=args.num_frames,
+            passing_method=args.passing_method,
+            concat_grid_cols=args.concat_grid_cols
         )
         
         # Output results

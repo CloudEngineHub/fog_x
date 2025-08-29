@@ -73,9 +73,15 @@ class VisionLanguageModel:
             **kwargs
         )
 
-    def __call__(self, frame: Union[np.ndarray, Image.Image],
+    def __call__(self, frame: Union[np.ndarray, Image.Image, List[Union[np.ndarray, Image.Image]]],
                  prompt: str) -> str:
-        """Analyze image with shared VLM service."""
+        """Analyze image(s) with shared VLM service.
+
+        Accepts a single frame or a list of frames; if a list is provided,
+        the service will analyze all images together with the same prompt.
+        """
+        if isinstance(frame, list):
+            return self.vlm_service.analyze_images(frame, prompt)
         return self.vlm_service.analyze_image(frame, prompt)
 
 
@@ -364,13 +370,13 @@ class VisionLanguageModelTool(BaseTool):
         if self.config.get("max_tokens", 256) <= 0:
             raise ValueError("max_tokens must be positive")
 
-    def __call__(self, frame: Union[np.ndarray, Image.Image],
+    def __call__(self, frame: Union[np.ndarray, Image.Image, List[Union[np.ndarray, Image.Image]]],
                  prompt: str) -> str:
         """
-        Analyze image with SGLang vision-language model.
+        Analyze image(s) with SGLang vision-language model.
 
         Args:
-            frame: Input image as numpy array or PIL Image
+            frame: Input image as numpy array or PIL Image, or list of images
             prompt: Natural language prompt/question about the image
 
         Returns:

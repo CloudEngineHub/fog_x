@@ -6,7 +6,7 @@ to avoid redundant model loading and improve batch inference efficiency.
 """
 
 import threading
-from typing import Union, Optional
+from typing import Union, Optional, List
 import numpy as np
 import base64
 import io
@@ -166,6 +166,53 @@ class VLMService:
             
         except Exception as e:
             return f"Error in VLM analysis: {str(e)}"
+
+    def analyze_images(self, frames: List[Union[np.ndarray, Image.Image]], prompt: str) -> str:
+        """Analyze multiple images together with a single prompt."""
+        if not OPENAI_AVAILABLE or self._client is None:
+            return f"Mock VLM response for multi-image prompt: {prompt}"
+
+        try:
+            client = self.get_client()
+
+            content = [
+                {
+                    "type": "text",
+                    "text": prompt
+                }
+            ]
+
+            for frame in frames:
+                image_base64 = self._encode_image_to_base64(frame)
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_base64}"
+                        }
+                    }
+                )
+
+            response = client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": content
+                    }
+                ],
+                max_tokens=self._config.get('max_tokens', 256),
+                temperature=self._config.get('temperature', 0.1)
+            )
+
+            content_text = response.choices[0].message.content
+            if content_text is None:
+                return f"Mock VLM response for multi-image prompt: {prompt} (model returned None content)"
+
+            return content_text.strip()
+
+        except Exception as e:
+            return f"Error in multi-image VLM analysis: {str(e)}"
     
     def generate_code(self, prompt: str) -> str:
         """Generate code using the language model."""
