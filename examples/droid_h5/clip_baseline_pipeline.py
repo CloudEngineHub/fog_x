@@ -1,21 +1,19 @@
-#!/usr/bin/env python3
+/up#!/usr/bin/env python3
 """
-SigLIP-2 Baseline Pipeline for DROID Trajectory Analysis
+CLIP Baseline Pipeline for DROID Trajectory Analysis
 
-This pipeline provides an alternative baseline using SigLIP-2 for ranking trajectories 
-based on cosine similarity to "failure robot trajectories" with frame stitching.
+This pipeline provides an alternative baseline using regular CLIP from HuggingFace transformers
+for ranking trajectories based on cosine similarity to "failure robot trajectories".
 
-Key features:
-- Uses SigLIP-2 model for vision-language embedding
-- Stitches frames together to create composite trajectory images
-- Ranks trajectories by cosine similarity to failure reference text
-- Implements cutoff mechanism based on number of failures
-- Parallel processing with Ray for scalability
+Key differences from SigLIP-2 version:
+- Uses CLIP model from HuggingFace transformers
+- Same frame stitching approach as SigLIP-2
+- Compatible output format for comparison
 
 Algorithm:
 1. Download/process DROID trajectories (reuse existing infrastructure)
 2. Extract and stitch frames from trajectory videos into composite images
-3. Generate SigLIP-2 embeddings for stitched images and failure reference text
+3. Generate CLIP embeddings for stitched images and failure reference text
 4. Compute cosine similarities between trajectory embeddings and failure text
 5. Rank trajectories by similarity and apply failure cutoff
 """
@@ -32,8 +30,8 @@ import math
 import ray
 import torch
 from torch.nn.functional import cosine_similarity
-from transformers import AutoModel, AutoProcessor
-from PIL import Image, ImageDraw, ImageFont
+from transformers import CLIPProcessor, CLIPModel
+from PIL import Image
 import cv2
 
 # Add RoboDM to path
@@ -50,37 +48,33 @@ from droid_pipeline import (
 )
 
 
-class SigLIP2Processor:
-    """SigLIP-2 model wrapper for processing stitched trajectory frames."""
+class CLIPProcessor_Custom:
+    """CLIP model wrapper for processing stitched trajectory frames."""
     
-    def __init__(self, model_name: str = "google/siglip2-base-patch16-224", device: str = "auto"):
-        """Initialize SigLIP-2 model and processor."""
+    def __init__(self, model_name: str = "openai/clip-vit-base-patch32", device: str = "auto"):
+        """Initialize CLIP model and processor."""
         self.model_name = model_name
         self.device = torch.device("cuda" if torch.cuda.is_available() and device == "auto" else device)
         
-        print(f"🤖 Loading SigLIP-2 model: {model_name}")
+        print(f"🤖 Loading CLIP model: {model_name}")
         
         try:
-            self.model = AutoModel.from_pretrained(
+            self.model = CLIPModel.from_pretrained(
                 model_name,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None
-            )
-            self.processor = AutoProcessor.from_pretrained(model_name)
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+            ).to(self.device)
+            self.processor = CLIPProcessor.from_pretrained(model_name)
             
-            if not torch.cuda.is_available():
-                self.model = self.model.to(self.device)
-            
-            print(f"✅ SigLIP-2 model loaded successfully on {self.device}")
+            print(f"✅ CLIP model loaded successfully on {self.device}")
             
         except Exception as e:
-            print(f"❌ Failed to load SigLIP-2 model: {e}")
-            print("💡 Make sure you have transformers>=4.49.0 installed:")
-            print("   pip install git+https://github.com/huggingface/transformers@v4.49.0-SigLIP-2")
+            print(f"❌ Failed to load CLIP model: {e}")
+            print("💡 Make sure you have transformers installed:")
+            print("   pip install transformers")
             raise
     
     def encode_text(self, text: str) -> torch.Tensor:
-        """Encode text using SigLIP-2 text encoder."""
+        """Encode text using CLIP text encoder."""
         inputs = self.processor(text=[text], return_tensors="pt", padding=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
@@ -90,7 +84,7 @@ class SigLIP2Processor:
         return outputs / outputs.norm(p=2, dim=-1, keepdim=True)  # Normalize
     
     def encode_image(self, image: Image.Image) -> torch.Tensor:
-        """Encode single image using SigLIP-2 vision encoder."""
+        """Encode single image using CLIP vision encoder."""
         inputs = self.processor(images=[image], return_tensors="pt", padding=True)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
@@ -135,17 +129,7 @@ def extract_frames_from_video(video_path: str, max_frames: int = 8) -> List[Imag
 
 def stitch_frames_into_composite(frames: List[Image.Image], grid_size: Optional[Tuple[int, int]] = None, 
                                target_size: Tuple[int, int] = (224, 224)) -> Image.Image:
-    """
-    Stitch multiple frames into a single composite image.
-    
-    Args:
-        frames: List of PIL Images to stitch together
-        grid_size: Optional (rows, cols) for grid layout. If None, auto-calculate
-        target_size: Target size for the final composite image
-    
-    Returns:
-        Composite PIL Image
-    """
+    """Stitch multiple frames into a single composite image."""
     if not frames:
         # Return blank image if no frames
         return Image.new('RGB', target_size, color=(128, 128, 128))
@@ -202,11 +186,11 @@ def find_trajectory_videos(trajectory_path: str) -> List[str]:
 
 
 @ray.remote(num_cpus=1, num_gpus=0.1 if torch.cuda.is_available() else 0)
-class SigLIP2Worker:
-    """Ray worker for parallel SigLIP-2 processing with frame stitching."""
+class CLIPWorker:
+    """Ray worker for parallel CLIP processing with frame stitching."""
     
-    def __init__(self, model_name: str = "google/siglip2-base-patch16-224"):
-        self.processor = SigLIP2Processor(model_name)
+    def __init__(self, model_name: str = "openai/clip-vit-base-patch32"):
+        self.processor = CLIPProcessor_Custom(model_name)
         
         # Pre-compute failure reference embedding
         self.failure_text = "This is a photo of a failed robot trajectory with errors and unsuccessful task completion."
@@ -281,16 +265,16 @@ class SigLIP2Worker:
             }
 
 
-def process_trajectories_with_siglip2(
+def process_trajectories_with_clip(
     trajectory_paths: List[str],
-    model_name: str = "google/siglip2-base-patch16-224",
+    model_name: str = "openai/clip-vit-base-patch32",
     max_workers: int = 4,
     max_frames_per_video: int = 8,
     frames_per_composite: int = 16
 ) -> Dict[str, Dict]:
-    """Process trajectories using SigLIP-2 with frame stitching and compute failure similarity scores."""
+    """Process trajectories using CLIP with frame stitching and compute failure similarity scores."""
     
-    print(f"🤖 Processing {len(trajectory_paths)} trajectories with SigLIP-2 + Frame Stitching")
+    print(f"🤖 Processing {len(trajectory_paths)} trajectories with CLIP")
     print(f"   Model: {model_name}")
     print(f"   Max workers: {max_workers}")
     print(f"   Max frames per video: {max_frames_per_video}")
@@ -301,7 +285,7 @@ def process_trajectories_with_siglip2(
         ray.init()
     
     # Create worker pool
-    workers = [SigLIP2Worker.remote(model_name) for _ in range(max_workers)]
+    workers = [CLIPWorker.remote(model_name) for _ in range(max_workers)]
     
     # Submit tasks to workers
     futures = []
@@ -347,7 +331,7 @@ def process_trajectories_with_siglip2(
     successful = sum(1 for r in results.values() if "error" not in r)
     failed = len(results) - successful
     
-    print(f"\n📊 SigLIP-2 Processing Summary:")
+    print(f"\n📊 CLIP Processing Summary:")
     print(f"   Total time: {total_time:.1f}s")
     print(f"   Successful: {successful}")
     print(f"   Failed: {failed}")
@@ -360,16 +344,7 @@ def rank_trajectories_by_failure_similarity(
     results: Dict[str, Dict],
     failure_cutoff_ratio: float = 0.3
 ) -> Tuple[List[Tuple[str, float]], int]:
-    """
-    Rank trajectories by similarity to failure reference and determine cutoff.
-    
-    Args:
-        results: SigLIP-2 processing results
-        failure_cutoff_ratio: Ratio of trajectories to classify as failures (0.0-1.0)
-    
-    Returns:
-        Tuple of (ranked_trajectories, failure_cutoff_index)
-    """
+    """Rank trajectories by similarity to failure reference and determine cutoff."""
     
     # Extract valid results with similarity scores
     valid_results = [
@@ -402,7 +377,7 @@ def generate_baseline_predictions(
     failure_cutoff_index: int,
     output_dir: str
 ) -> str:
-    """Generate baseline predictions based on SigLIP-2 similarity ranking."""
+    """Generate baseline predictions based on CLIP similarity ranking."""
     
     predictions = {}
     
@@ -421,11 +396,11 @@ def generate_baseline_predictions(
             "success": not is_failure,  # For compatibility with validation
             "similarity_score": similarity_score,
             "rank": i + 1,
-            "method": "siglip2_stitched_baseline"
+            "method": "clip_stitched_baseline"
         }
     
     # Save predictions
-    predictions_file = os.path.join(output_dir, "siglip2_baseline_predictions.json")
+    predictions_file = os.path.join(output_dir, "clip_baseline_predictions.json")
     with open(predictions_file, 'w') as f:
         json.dump(predictions, f, indent=2)
     
@@ -440,33 +415,18 @@ def generate_baseline_predictions(
     return predictions_file
 
 
-def run_siglip2_baseline_pipeline(
+def run_clip_baseline_pipeline(
     trajectory_gcs_paths: List[str],
     output_dir: str,
-    model_name: str = "google/siglip2-base-patch16-224",
+    model_name: str = "openai/clip-vit-base-patch32",
     failure_cutoff_ratio: float = 0.3,
     max_workers: int = 4,
     max_frames_per_video: int = 8,
     frames_per_composite: int = 16,
     skip_download: bool = False
 ) -> Dict:
-    """
-    Run complete SigLIP-2 baseline pipeline with frame stitching.
-    
-    Args:
-        trajectory_gcs_paths: GCS paths to DROID trajectories
-        output_dir: Output directory for all files
-        model_name: SigLIP-2 model name to use
-        failure_cutoff_ratio: Ratio of trajectories to classify as failures
-        max_workers: Maximum parallel workers
-        max_frames_per_video: Maximum frames to extract per video
-        frames_per_composite: Maximum frames to include in stitched composite
-        skip_download: Skip download if trajectories already exist locally
-        
-    Returns:
-        Dictionary with comprehensive pipeline results
-    """
-    print("🎯 SigLIP-2 Baseline Pipeline - Stitched Frame Analysis")
+    """Run complete CLIP baseline pipeline with frame stitching."""
+    print("🎯 CLIP Baseline Pipeline - Stitched Frame Analysis")
     print("=" * 60)
     
     pipeline_start = time.time()
@@ -503,12 +463,12 @@ def run_siglip2_baseline_pipeline(
         print("❌ No trajectories were successfully downloaded!")
         return results
     
-    # Stage 2: SigLIP-2 Processing with Frame Stitching
-    print("\n🎨 Stage 2: SigLIP-2 Processing with Frame Stitching")
-    print("-" * 50)
+    # Stage 2: CLIP Processing with Frame Stitching
+    print(f"\n🎨 Stage 2: CLIP Processing with Frame Stitching")
+    print("-" * 45)
     
     try:
-        siglip2_results = process_trajectories_with_siglip2(
+        clip_results = process_trajectories_with_clip(
             successful_paths,
             model_name=model_name,
             max_workers=max_workers,
@@ -517,19 +477,19 @@ def run_siglip2_baseline_pipeline(
         )
         
         # Save detailed results
-        siglip2_file = os.path.join(output_dir, "siglip2_detailed_results.json")
-        with open(siglip2_file, 'w') as f:
-            json.dump(siglip2_results, f, indent=2)
+        clip_file = os.path.join(output_dir, "clip_detailed_results.json")
+        with open(clip_file, 'w') as f:
+            json.dump(clip_results, f, indent=2)
         
-        results["stages"]["siglip2_processing"] = {
-            "total_processed": len(siglip2_results),
-            "successful": sum(1 for r in siglip2_results.values() if "error" not in r),
-            "failed": sum(1 for r in siglip2_results.values() if "error" in r),
-            "results_file": siglip2_file
+        results["stages"]["clip_processing"] = {
+            "total_processed": len(clip_results),
+            "successful": sum(1 for r in clip_results.values() if "error" not in r),
+            "failed": sum(1 for r in clip_results.values() if "error" in r),
+            "results_file": clip_file
         }
         
     except Exception as e:
-        print(f"❌ SigLIP-2 processing failed: {e}")
+        print(f"❌ CLIP processing failed: {e}")
         return results
     
     # Stage 3: Ranking and Classification
@@ -537,7 +497,7 @@ def run_siglip2_baseline_pipeline(
     print("-" * 50)
     
     ranked_trajectories, failure_cutoff_index = rank_trajectories_by_failure_similarity(
-        siglip2_results, failure_cutoff_ratio
+        clip_results, failure_cutoff_ratio
     )
     
     results["stages"]["ranking"] = {
@@ -565,18 +525,17 @@ def run_siglip2_baseline_pipeline(
     total_time = time.time() - pipeline_start
     results["total_time"] = total_time
     
-    print(f"\n🎉 SigLIP-2 Baseline Pipeline Complete!")
+    print(f"\n🎉 CLIP Baseline Pipeline Complete!")
     print(f"📊 Total time: {total_time/60:.1f} minutes")
     print(f"📁 All results saved to: {output_dir}")
     
     # Save pipeline summary
-    summary_file = os.path.join(output_dir, "siglip2_baseline_summary.json")
+    summary_file = os.path.join(output_dir, "clip_baseline_summary.json")
     with open(summary_file, 'w') as f:
         json.dump(results, f, indent=2)
     
     print(f"📄 Pipeline summary: {summary_file}")
     print(f"🔍 Predictions file: {predictions_file}")
-    print(f"📊 Use validate_vlm_responses.py to compare against ground truth")
     
     return results
 
@@ -584,26 +543,8 @@ def run_siglip2_baseline_pipeline(
 def main():
     """Main function with command-line interface."""
     parser = argparse.ArgumentParser(
-        description="SigLIP-2 Baseline Pipeline with Frame Stitching for DROID Trajectory Analysis",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    # Default: Use pre-generated paths with SigLIP-2 baseline
-    python siglip2_baseline_pipeline.py
-    
-    # Custom model and parameters
-    python siglip2_baseline_pipeline.py \\
-        --model-name google/siglip2-so400m-patch14-224 \\
-        --failure-cutoff-ratio 0.4 \\
-        --frames-per-composite 20 \\
-        --num-trajectories 50
-    
-    # Quick test mode
-    python siglip2_baseline_pipeline.py \\
-        --auto-scan --quick-mode \\
-        --num-trajectories 10 \\
-        --frames-per-composite 8
-        """)
+        description="CLIP Baseline Pipeline with Frame Stitching for DROID Trajectory Analysis"
+    )
     
     # Trajectory selection arguments
     trajectory_group = parser.add_mutually_exclusive_group(required=False)
@@ -622,7 +563,7 @@ Examples:
     
     parser.add_argument(
         "--num-trajectories", type=int, default=100,
-        help="Number of trajectories to select (default: 30)"
+        help="Number of trajectories to select (default: 100)"
     )
     parser.add_argument(
         "--balance", type=float,
@@ -633,10 +574,10 @@ Examples:
         help="Random seed for reproducible selection"
     )
     
-    # SigLIP-2 specific arguments
+    # CLIP specific arguments
     parser.add_argument(
-        "--model-name", default="google/siglip2-base-patch16-224",
-        help="SigLIP-2 model name (default: google/siglip2-base-patch16-224)"
+        "--model-name", default="openai/clip-vit-base-patch32",
+        help="CLIP model name (default: openai/clip-vit-base-patch32)"
     )
     parser.add_argument(
         "--failure-cutoff-ratio", type=float, default=0.3,
@@ -653,8 +594,8 @@ Examples:
     
     # General arguments
     parser.add_argument(
-        "--output-dir", default="./siglip2_baseline_output",
-        help="Output directory (default: ./siglip2_baseline_output)"
+        "--output-dir", default="./clip_baseline_output",
+        help="Output directory (default: ./clip_baseline_output)"
     )
     parser.add_argument(
         "--max-workers", type=int, default=4,
@@ -703,8 +644,8 @@ Examples:
     os.makedirs(args.output_dir, exist_ok=True)
     
     if args.dry_run:
-        print("🔍 SigLIP-2 Stitched Baseline - Configuration")
-        print("=" * 50)
+        print("🔍 CLIP Baseline - Configuration")
+        print("=" * 35)
         print(f"Model: {args.model_name}")
         print(f"Failure cutoff ratio: {args.failure_cutoff_ratio}")
         print(f"Max frames per video: {args.max_frames_per_video}")
@@ -714,7 +655,7 @@ Examples:
         return 0
     
     try:
-        results = run_siglip2_baseline_pipeline(
+        results = run_clip_baseline_pipeline(
             trajectory_gcs_paths=trajectory_paths,
             output_dir=args.output_dir,
             model_name=args.model_name,
@@ -725,7 +666,7 @@ Examples:
             skip_download=args.skip_download
         )
         
-        print(f"\n🎉 SigLIP-2 Baseline Pipeline completed successfully!")
+        print(f"\n🎉 CLIP Baseline Pipeline completed successfully!")
         return 0
         
     except KeyboardInterrupt:

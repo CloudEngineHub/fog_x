@@ -23,6 +23,8 @@ Usage examples:
     python evaluate_vlm_configs.py \
         --trajectories gs://.../success/... gs://.../failure/... \
         --eval-root ./eval_runs
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 SGLANG_VLM_CACHE_SIZE_MB=1024 python3 -m sglang.launch_server   --model-path Qwen/Qwen2.5-VL-32B-Instruct   --host 0.0.0.0   --port 30000 --tp 4 --mem-fraction-static 0.6 --chunked-prefill-size 4096
 """
 
 import argparse
@@ -118,22 +120,35 @@ def main():
     parser.add_argument("--balance", type=float, help="Success ratio target in sampling, e.g., 0.5")
     parser.add_argument("--seed", type=int, help="Random seed")
     parser.add_argument("--max-workers", type=int, default=4, help="Parallel workers for VLM")
-    parser.add_argument("--eval-root", default="./eval_runs", help="Root folder for evaluation outputs")
+    parser.add_argument("--eval-root", default="./eval_runs_2", help="Root folder for evaluation outputs")
     parser.add_argument("--num-trials", type=int, default=1, help="Number of trials per configuration")
 
-    parser.add_argument("--frame-counts", type=int, nargs='+', default=[2, 4, 6, 8, 10],
+    parser.add_argument("--frame-counts", type=int, nargs='+', default=[2, 4, 8, 16, 32],
                         help="Frame counts to evaluate")
-    parser.add_argument("--passing-methods", nargs='+', default=["stream", "concat"],
+    parser.add_argument("--passing-methods", nargs='+', default=["stream"],
                         choices=["stream", "concat"], help="Passing methods to evaluate")
-    parser.add_argument("--video-path-keys", nargs='*', default=None,
-                        help="Video path keys from metadata (e.g., ext1_mp4_path wrist_mp4_path). If omitted, auto-detect.")
+    parser.add_argument("--video-path-keys", nargs='*', default=["ext1_mp4_path"],
+                        help="Video path keys from metadata (e.g., ext1_mp4_path wrist_mp4_path all). 'all' concatenates ext1_mp4_path and wrist_mp4_path. If omitted, auto-detect.")
 
     parser.add_argument("--language-key", default="metadata/language_instruction",
                         help="Language key to extract from HDF5 fallback")
     parser.add_argument("--question", default="Is this trajectory successful?",
                         help="VLM question")
+    parser.add_argument("--use-gpt", action="store_true",
+                        help="Use GPT vision API instead of local VLM")
+    parser.add_argument("--gpt-api-key",
+                        help="OpenAI API key (or set OPENAI_API_KEY environment variable)")
+    parser.add_argument("--gpt-model", default="gpt-5-2025-08-07",
+                        # choices=["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+                        help="GPT model to use for vision tasks")
 
     args = parser.parse_args()
+
+    # Handle GPT API key
+    gpt_api_key = args.gpt_api_key or os.environ.get("OPENAI_API_KEY")
+    if args.use_gpt and not gpt_api_key:
+        print("❌ GPT API key required when using --use-gpt. Set --gpt-api-key or OPENAI_API_KEY environment variable.")
+        return 1
 
     # Resolve GCS paths
     if args.trajectories:
@@ -180,7 +195,11 @@ def main():
                 configs.append((method, n, None))
             else:
                 for cam_key in args.video_path_keys:
-                    configs.append((method, n, cam_key))
+                    # Handle 'all' option to concatenate ext1_mp4_path and wrist_mp4_path
+                    if cam_key == "all":
+                        configs.append((method, n, "all"))
+                    else:
+                        configs.append((method, n, cam_key))
 
     start_all = time.time()
     for (method, n, cam_key) in configs:
@@ -204,7 +223,10 @@ def main():
                 video_path_key=cam_key,
                 num_frames=n,
                 passing_method=method,
-                concat_grid_cols=None
+                concat_grid_cols=None,
+                use_gpt=args.use_gpt,
+                gpt_api_key=gpt_api_key,
+                gpt_model=args.gpt_model
             )
 
             # Persist raw results per trial

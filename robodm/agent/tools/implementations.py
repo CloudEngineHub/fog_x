@@ -330,7 +330,8 @@ class VisionLanguageModelTool(BaseTool):
             temperature=temperature,
             max_tokens=max_tokens,
             trust_remote_code=kwargs.get("trust_remote_code", True),
-            **kwargs
+            start_command=kwargs.get("start_command"),
+            **{k: v for k, v in kwargs.items() if k not in ["trust_remote_code", "start_command"]}
         )
         
         self.vlm = VisionLanguageModel(
@@ -338,7 +339,7 @@ class VisionLanguageModelTool(BaseTool):
             temperature=temperature,
             max_tokens=max_tokens,
             trust_remote_code=kwargs.get("trust_remote_code", True),
-            **kwargs
+            **{k: v for k, v in kwargs.items() if k not in ["trust_remote_code", "start_command"]}
         )
 
     @classmethod
@@ -394,8 +395,9 @@ class VisionLanguageModelTool(BaseTool):
             temperature=self.config.get("temperature", 0.1),
             max_tokens=self.config.get("max_tokens", 256),
             trust_remote_code=self.config.get("trust_remote_code", True),
+            start_command=self.config.get("start_command"),
             **{k: v for k, v in self.config.items() 
-               if k not in ["model", "temperature", "max_tokens", "trust_remote_code"]}
+               if k not in ["model", "temperature", "max_tokens", "trust_remote_code", "start_command"]}
         )
         
         # Recreate VLM instance with new config
@@ -405,7 +407,7 @@ class VisionLanguageModelTool(BaseTool):
             max_tokens=self.config.get("max_tokens", 256),
             trust_remote_code=self.config.get("trust_remote_code", True),
             **{k: v for k, v in self.config.items() 
-               if k not in ["model", "temperature", "max_tokens", "trust_remote_code"]}
+               if k not in ["model", "temperature", "max_tokens", "trust_remote_code", "start_command"]}
         )
 
 

@@ -19,6 +19,8 @@ import os
 import ray
 import time
 import glob
+import base64
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -27,8 +29,28 @@ import cv2
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
+from PIL import Image
 
 from robodm.agent.tools import ToolsManager
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+# Meta configuration for image processing
+IMAGE_CONFIG = {
+    "target_height": 360,
+    "target_width": 640
+}
+
+# GPT configuration
+GPT_CONFIG = {
+    "model": "gpt-4o",  # Default GPT model with vision capabilities
+    "max_tokens": 4000,
+    "temperature": 0.1,
+    "detail": "high"  # Image detail level for GPT vision
+}
 
 
 def extract_frames_from_mp4(mp4_path: str, max_frames: int = 10) -> List[np.ndarray]:
@@ -94,7 +116,7 @@ def make_image_grid(images: List[np.ndarray], grid_cols: Optional[int] = None, t
     Images are resized to a common size and arranged row-wise.
     """
     if not images:
-        return np.zeros((480, 640, 3), dtype=np.uint8)
+        return np.zeros((IMAGE_CONFIG["target_height"], IMAGE_CONFIG["target_width"], 3), dtype=np.uint8)
 
     # Determine grid columns
     num_images = len(images)
@@ -107,8 +129,8 @@ def make_image_grid(images: List[np.ndarray], grid_cols: Optional[int] = None, t
         # Use median size to reduce distortion
         heights = [img.shape[0] for img in images if len(img.shape) == 3]
         widths = [img.shape[1] for img in images if len(img.shape) == 3]
-        h = int(np.median(heights)) if heights else 480
-        w = int(np.median(widths)) if widths else 640
+        h = int(np.median(heights)) if heights else IMAGE_CONFIG["target_height"]
+        w = int(np.median(widths)) if widths else IMAGE_CONFIG["target_width"]
         target_size = (w, h)
 
     # Resize all images
@@ -133,6 +155,121 @@ def make_image_grid(images: List[np.ndarray], grid_cols: Optional[int] = None, t
 
     return canvas
 
+
+def encode_image_base64(image: np.ndarray) -> str:
+    """
+    Encode a numpy image array to base64 string for GPT API.
+    
+    Args:
+        image: RGB image as numpy array
+        
+    Returns:
+        Base64 encoded string
+    """
+    # Convert numpy array to PIL Image
+    pil_image = Image.fromarray(image.astype(np.uint8))
+    
+    # Convert to JPEG bytes
+    buffered = BytesIO()
+    pil_image.save(buffered, format="JPEG", quality=95)
+    
+    # Encode to base64
+    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+    return img_base64
+
+
+def call_gpt_vision(images: List[np.ndarray], prompt: str, api_key: str, model: str = "gpt-4o") -> str:
+    """
+    Call GPT vision API with images and prompt.
+    
+    Args:
+        images: List of RGB images as numpy arrays
+        prompt: Text prompt for the model
+        api_key: OpenAI API key
+        model: GPT model to use
+        
+    Returns:
+        GPT response text
+    """
+    if OpenAI is None:
+        raise ImportError("OpenAI package not installed. Install with: pip install openai")
+    
+    client = OpenAI(api_key=api_key)
+    
+    # Prepare messages
+    content = [{"type": "text", "text": prompt}]
+    
+    # Add images
+    for image in images:
+        image_b64 = encode_image_base64(image)
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{image_b64}",
+                "detail": GPT_CONFIG["detail"]
+            }
+        })
+    
+    # Make API call
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": content
+            }
+        ],
+        max_completion_tokens=GPT_CONFIG["max_tokens"],
+        # temperature=GPT_CONFIG["temperature"]
+    )
+    
+    return response.choices[0].message.content
+
+
+def stitch_frames_horizontally(frames1: List[np.ndarray], frames2: List[np.ndarray]) -> List[np.ndarray]:
+    """
+    Stitch frames from two video sources side by side horizontally.
+    
+    Args:
+        frames1: Frames from first video (e.g., ext1 camera)
+        frames2: Frames from second video (e.g., wrist camera)
+        
+    Returns:
+        List of stitched frames
+    """
+    if not frames1 or not frames2:
+        return frames1 if frames1 else frames2
+    
+    # Use minimum number of frames available from both videos
+    min_frames = min(len(frames1), len(frames2))
+    stitched_frames = []
+    
+    for i in range(min_frames):
+        frame1 = frames1[i]
+        frame2 = frames2[i]
+        
+        # Ensure both frames have the same height
+        h1, w1 = frame1.shape[:2]
+        h2, w2 = frame2.shape[:2]
+        
+        # Resize to same height (use minimum height to maintain aspect ratios)
+        target_height = min(h1, h2)
+        
+        # Calculate new widths maintaining aspect ratio
+        new_w1 = int(w1 * target_height / h1)
+        new_w2 = int(w2 * target_height / h2)
+        
+        # Resize frames
+        resized_frame1 = cv2.resize(frame1, (new_w1, target_height))
+        resized_frame2 = cv2.resize(frame2, (new_w2, target_height))
+        
+        # Stitch horizontally
+        stitched_frame = np.hstack([resized_frame1, resized_frame2])
+        stitched_frames.append(stitched_frame)
+    
+    print(f"    🔗 Stitched {min_frames} frames from two camera views")
+    return stitched_frames
+
 def create_state_visualization(data: Dict[str, Any], max_frames: int = 10) -> List[np.ndarray]:
     # State visualization removed to focus purely on MP4 perception
     return []
@@ -144,14 +281,38 @@ def find_video_files_in_trajectory(trajectory_dir: str, video_path_key: str = No
     
     Args:
         trajectory_dir: Path to DROID trajectory directory
-        video_path_key: Specific video path key from metadata (e.g., 'ext1_mp4_path', 'wrist_mp4_path')
+        video_path_key: Specific video path key from metadata (e.g., 'ext1_mp4_path', 'wrist_mp4_path', 'all')
         
     Returns:
         List of paths to MP4 video files
     """
     video_files = []
     
-    if video_path_key:
+    if video_path_key == "all":
+        # Special case: get both ext1_mp4_path and wrist_mp4_path for stitching
+        metadata_files = list(Path(trajectory_dir).glob("metadata_*.json"))
+        if metadata_files:
+            with open(metadata_files[0], 'r') as f:
+                metadata = json.load(f)
+            
+            for key in ["ext1_mp4_path", "wrist_mp4_path"]:
+                if key in metadata:
+                    relative_path = metadata[key]
+                    video_filename = os.path.basename(relative_path)
+                    local_video_path = os.path.join(trajectory_dir, "recordings", "MP4", video_filename)
+                    
+                    if os.path.exists(local_video_path):
+                        video_files.append(local_video_path)
+                        print(f"    📹 Found video for stitching: {key} -> {os.path.basename(local_video_path)}")
+                    else:
+                        print(f"    ⚠️ Video for stitching not found: {key} -> {local_video_path}")
+            
+            if len(video_files) == 2:
+                print(f"    🔗 Will stitch together ext1 and wrist camera views")
+            else:
+                print(f"    ⚠️ Could not find both cameras for stitching (found {len(video_files)}/2)")
+        
+    elif video_path_key:
         # Use specific video path from metadata
         metadata_files = list(Path(trajectory_dir).glob("metadata_*.json"))
         if metadata_files:
@@ -210,7 +371,10 @@ def process_single_trajectory(
     video_path_key: Optional[str] = None,
     num_frames: int = 6,
     passing_method: str = "stream",
-    concat_grid_cols: Optional[int] = None
+    concat_grid_cols: Optional[int] = None,
+    use_gpt: bool = False,
+    gpt_api_key: Optional[str] = None,
+    gpt_model: str = "gpt-4o"
 ) -> Dict[str, Any]:
     """
     Process a single trajectory with VLM analysis.
@@ -244,15 +408,29 @@ def process_single_trajectory(
             video_files = find_video_files_in_trajectory(trajectory_path, video_path_key)
             
             if video_files:
-                # Use the first video file (typically exterior camera)
-                primary_video = video_files[0]
-                print(f"  📹 Using primary video: {os.path.basename(primary_video)}")
-                
-                # Extract frames from the video
-                images = extract_frames_from_mp4(primary_video, max_frames=max(num_frames, 1))
-                
-                if not images:
-                    print(f"  ⚠️ Failed to extract frames from video")
+                if video_path_key == "all" and len(video_files) == 2:
+                    # Stitch frames from both cameras
+                    print(f"  🔗 Stitching frames from both cameras: {[os.path.basename(f) for f in video_files]}")
+                    
+                    # Extract frames from both videos
+                    frames1 = extract_frames_from_mp4(video_files[0], max_frames=max(num_frames, 1))
+                    frames2 = extract_frames_from_mp4(video_files[1], max_frames=max(num_frames, 1))
+                    
+                    # Stitch the frames together
+                    images = stitch_frames_horizontally(frames1, frames2)
+                    
+                    if not images:
+                        print(f"  ⚠️ Failed to stitch frames from videos")
+                else:
+                    # Use the first video file (typically exterior camera)
+                    primary_video = video_files[0]
+                    print(f"  📹 Using primary video: {os.path.basename(primary_video)}")
+                    
+                    # Extract frames from the video
+                    images = extract_frames_from_mp4(primary_video, max_frames=max(num_frames, 1))
+                    
+                    if not images:
+                        print(f"  ⚠️ Failed to extract frames from video")
             else:
                 print(f"  ⚠️ No video files found in DROID directory")
             
@@ -286,39 +464,68 @@ def process_single_trajectory(
         
         # Prepare frames for VLM analysis
         processed_frames = []
+        target_size = (IMAGE_CONFIG["target_width"], IMAGE_CONFIG["target_height"])
+        
         for img in selected_images:
             if len(img.shape) == 3:
-                processed_frames.append(img)
+                # Resize to target dimensions
+                resized_img = cv2.resize(img, target_size)
+                processed_frames.append(resized_img)
             elif len(img.shape) == 2:
-                processed_frames.append(cv2.cvtColor(img, cv2.COLOR_GRAY2RGB))
+                # Convert grayscale to RGB and resize
+                rgb_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                resized_img = cv2.resize(rgb_img, target_size)
+                processed_frames.append(resized_img)
             else:
-                processed_frames.append(np.zeros((480, 640, 3), dtype=np.uint8))
+                processed_frames.append(np.zeros((IMAGE_CONFIG["target_height"], IMAGE_CONFIG["target_width"], 3), dtype=np.uint8))
 
-        # Initialize VLM tools
-        tools_manager = ToolsManager(config=tools_config)
-        
-        # Get the VLM tool
-        vlm_tool = tools_manager.get_tool("robo2vlm")
-        
         traj_name = os.path.splitext(os.path.basename(trajectory_path))[0]
 
         frame_responses = []
-        if passing_method == "stream":
-            # Pass all frames together with a single prompt (no per-frame captioning)
-            final_prompt = f"""These are {len(processed_frames)} evenly sampled frames from a robot trajectory in temporal order. Considering them together, does the trajectory look successful? First answer yes or no, then explain why."""
-            vlm_response = vlm_tool(processed_frames, final_prompt)
-            processing_method_used = "all_frames_stream"
+        if use_gpt:
+            # Use GPT vision API
+            if not gpt_api_key:
+                raise ValueError("GPT API key required when use_gpt=True")
+            
+            if passing_method == "stream":
+                # Pass all frames together with a single prompt
+                final_prompt = f"""These are {len(processed_frames)} evenly sampled frames from a robot trajectory in temporal order. Considering them together, does the trajectory look successful? First answer yes or no, then explain why."""
+                vlm_response = call_gpt_vision(processed_frames, final_prompt, gpt_api_key, gpt_model)
+                processing_method_used = "all_frames_stream_gpt"
+            else:
+                # Concatenate frames into a tiled grid and analyze once
+                grid_image = make_image_grid(processed_frames, grid_cols=concat_grid_cols)
+                final_prompt = f"""This image is a tiled grid of {len(processed_frames)} evenly sampled frames from a robot trajectory (ordered left-to-right, top-to-bottom). Based on this sequence, does the trajectory look successful? First answer yes or no, then explain why."""
+                vlm_response = call_gpt_vision([grid_image], final_prompt, gpt_api_key, gpt_model)
+                processing_method_used = "concat_grid_gpt"
+                # Optionally save the grid image
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                    grid_path = Path(output_dir) / f"{traj_name}_grid.jpg"
+                    cv2.imwrite(str(grid_path), cv2.cvtColor(grid_image, cv2.COLOR_RGB2BGR))
         else:
-            # Concatenate frames into a tiled grid and analyze once
-            grid_image = make_image_grid(processed_frames, grid_cols=concat_grid_cols)
-            final_prompt = f"""This image is a tiled grid of {len(processed_frames)} evenly sampled frames from a robot trajectory (ordered left-to-right, top-to-bottom). Based on this sequence, does the trajectory look successful? First answer yes or no, then explain why."""
-            vlm_response = vlm_tool(grid_image, final_prompt)
-            processing_method_used = "concat_grid"
-            # Optionally save the grid image
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
-                grid_path = Path(output_dir) / f"{traj_name}_grid.jpg"
-                cv2.imwrite(str(grid_path), cv2.cvtColor(grid_image, cv2.COLOR_RGB2BGR))
+            # Use existing VLM tools
+            tools_manager = ToolsManager(config=tools_config)
+            
+            # Get the VLM tool
+            vlm_tool = tools_manager.get_tool("robo2vlm")
+            
+            if passing_method == "stream":
+                # Pass all frames together with a single prompt (no per-frame captioning)
+                final_prompt = f"""These are {len(processed_frames)} evenly sampled frames from a robot trajectory in temporal order. Considering them together, does the trajectory look successful? First answer yes or no, then explain why."""
+                vlm_response = vlm_tool(processed_frames, final_prompt)
+                processing_method_used = "all_frames_stream"
+            else:
+                # Concatenate frames into a tiled grid and analyze once
+                grid_image = make_image_grid(processed_frames, grid_cols=concat_grid_cols)
+                final_prompt = f"""This image is a tiled grid of {len(processed_frames)} evenly sampled frames from a robot trajectory (ordered left-to-right, top-to-bottom). Based on this sequence, does the trajectory look successful? First answer yes or no, then explain why."""
+                vlm_response = vlm_tool(grid_image, final_prompt)
+                processing_method_used = "concat_grid"
+                # Optionally save the grid image
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                    grid_path = Path(output_dir) / f"{traj_name}_grid.jpg"
+                    cv2.imwrite(str(grid_path), cv2.cvtColor(grid_image, cv2.COLOR_RGB2BGR))
         
         # Extract success prediction from VLM response (aligned with droid_vlm_demo.py)
         response_lower = vlm_response.lower()
@@ -400,7 +607,10 @@ def process_trajectories_parallel(
     video_path_key: Optional[str] = None,
     num_frames: Optional[int] = None,
     passing_method: str = "stream",
-    concat_grid_cols: Optional[int] = None
+    concat_grid_cols: Optional[int] = None,
+    use_gpt: bool = False,
+    gpt_api_key: Optional[str] = None,
+    gpt_model: str = "gpt-4o"
 ) -> Dict[str, Dict[str, Any]]:
     """
     Process multiple trajectories in parallel with VLM analysis.
@@ -425,8 +635,7 @@ def process_trajectories_parallel(
             "robo2vlm": {
                 "model": "Qwen/Qwen2.5-VL-32B-Instruct",
                 "temperature": 0.1,
-                "max_tokens": 4096,
-                "context_length": 1024
+                "max_tokens": 40960,
             }
         }
     }
@@ -434,6 +643,7 @@ def process_trajectories_parallel(
     print(f"🚀 Starting parallel processing of {len(trajectory_paths)} trajectories")
     print(f"📊 Configuration:")
     print(f"   Question: {question}")
+    print(f"   Model: {'GPT-' + gpt_model if use_gpt else 'Qwen/Qwen2.5-VL-32B-Instruct'}")
     if num_frames is not None:
         print(f"   Num frames: {num_frames}")
     print(f"   Passing method: {passing_method}")
@@ -454,7 +664,10 @@ def process_trajectories_parallel(
             video_path_key=video_path_key,
             num_frames=(num_frames if num_frames is not None else 6),
             passing_method=passing_method,
-            concat_grid_cols=concat_grid_cols
+            concat_grid_cols=concat_grid_cols,
+            use_gpt=use_gpt,
+            gpt_api_key=gpt_api_key,
+            gpt_model=gpt_model
         )
         futures.append(future)
     
@@ -576,8 +789,29 @@ Examples:
         type=int,
         help="Number of columns for concatenated grid (concat mode). Default sqrt(N)."
     )
+    parser.add_argument(
+        "--use-gpt",
+        action="store_true",
+        help="Use GPT vision API instead of local VLM"
+    )
+    parser.add_argument(
+        "--gpt-api-key",
+        help="OpenAI API key (or set OPENAI_API_KEY environment variable)"
+    )
+    parser.add_argument(
+        "--gpt-model",
+        default="gpt-4o",
+        choices=["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+        help="GPT model to use for vision tasks"
+    )
     
     args = parser.parse_args()
+    
+    # Handle GPT API key
+    gpt_api_key = args.gpt_api_key or os.environ.get("OPENAI_API_KEY")
+    if args.use_gpt and not gpt_api_key:
+        print("❌ GPT API key required when using --use-gpt. Set --gpt-api-key or OPENAI_API_KEY environment variable.")
+        return 1
     
     # Expand glob patterns and validate paths
     trajectory_paths = []
@@ -621,7 +855,10 @@ Examples:
             video_path_key=args.video_path_key,
             num_frames=args.num_frames,
             passing_method=args.passing_method,
-            concat_grid_cols=args.concat_grid_cols
+            concat_grid_cols=args.concat_grid_cols,
+            use_gpt=args.use_gpt,
+            gpt_api_key=gpt_api_key,
+            gpt_model=args.gpt_model
         )
         
         # Output results
