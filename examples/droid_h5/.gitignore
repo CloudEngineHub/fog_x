@@ -1,8 +1,0 @@
-results/
-output/
-eval_runs/
-clip_700_output/
-eval_runs_2/
-*.png
-*.pdf
-eval_runs*
