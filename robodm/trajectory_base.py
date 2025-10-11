@@ -11,13 +11,15 @@ class TrajectoryInterface(ABC):
     """
 
     @abstractmethod
-    def add(self,
-            feature: str,
-            data: Any,
-            timestamp: Optional[int] = None,
-            time_unit: Optional[str] = None) -> None:
+    def add(
+        self,
+        feature: str,
+        data: Any,
+        timestamp: Optional[int] = None,
+        time_unit: Optional[str] = None,
+    ) -> None:
         """Add a single feature value to the trajectory.
-        
+
         Args:
             feature (str): name of the feature
             data (Any): value associated with the feature; except dictionary
@@ -27,12 +29,14 @@ class TrajectoryInterface(ABC):
         pass
 
     @abstractmethod
-    def add_by_dict(self,
-                    data: Dict[str, Any],
-                    timestamp: Optional[int] = None,
-                    time_unit: Optional[str] = None) -> None:
+    def add_by_dict(
+        self,
+        data: Dict[str, Any],
+        timestamp: Optional[int] = None,
+        time_unit: Optional[str] = None,
+    ) -> None:
         """Add multiple features from a dictionary to the trajectory.
-        
+
         Args:
             data (Dict[str, Any]): dictionary of feature name and value
             timestamp (optional int): timestamp value. If not provided, the current time is used.
@@ -41,12 +45,14 @@ class TrajectoryInterface(ABC):
         pass
 
     @abstractmethod
-    def load(self,
-             return_type: str = "numpy",
-             desired_frequency: Optional[float] = None,
-             data_slice: Optional[slice] = None) -> Union[Dict, Any]:
+    def load(
+        self,
+        return_type: str = "numpy",
+        desired_frequency: Optional[float] = None,
+        data_slice: Optional[slice] = None,
+    ) -> Union[Dict, Any]:
         """Load trajectory data with optional temporal resampling and slicing.
-        
+
         Parameters
         ----------
         return_type : {"numpy", "container"}, default "numpy"
@@ -63,7 +69,7 @@ class TrajectoryInterface(ABC):
     @abstractmethod
     def close(self, compact: bool = True) -> None:
         """Close the trajectory file.
-        
+
         Args:
             compact: re-read from the cache to encode pickled data to images
         """
@@ -82,7 +88,7 @@ class TrajectoryInterface(ABC):
     @abstractmethod
     def init_feature_streams(self, feature_spec: Dict) -> None:
         """Initialize the feature stream with the feature name and its type.
-        
+
         Args:
             feature_spec: dictionary of feature name and its type
         """
